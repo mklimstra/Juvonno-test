@@ -1,3 +1,4 @@
 dash
 dash-auth-external
 python-dotenv
+pandas
