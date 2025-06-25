@@ -8,9 +8,11 @@ import dash_bootstrap_components as dbc
 import requests
 import math
 
-from layout import Footer, Navbar, Pagination
+from layout import Footer, Navbar, Pagination, GeographyFilters
 
 from settings import *
+
+from utils import fetch_options, fetch_profiles, restructure_profile
 
 # creating the instance of our auth class
 auth = DashAuthExternal(AUTH_URL,
@@ -22,12 +24,10 @@ server = (
     auth.server
 )  # retrieving the flask server which has our redirect rules assigned
 
-
 here = os.path.dirname(os.path.abspath(__file__))
 assets_path = os.path.join(here, "assets")
-server.static_folder    = assets_path
-server.static_url_path  = "/assets"
-
+server.static_folder = assets_path
+server.static_url_path = "/assets"
 
 # Initialize the Dash app
 app = Dash(__name__,
@@ -36,20 +36,7 @@ app = Dash(__name__,
            external_stylesheets=[dbc.themes.BOOTSTRAP,
                                  "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css"])
 
-def fetch_options(path, token, label_key, value_key, limit=1000):
-    headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(f"{SITE_URL}{path}", params={"limit": limit}, headers=headers, timeout=5)
-    resp.raise_for_status()
-    items = resp.json()["results"]
-
-    return [{"label": item[label_key], "value": item[value_key]} for item in items]
-
-    # if isinstance(items,list):
-    #     return [{"label": item, "value": item} for item in items]
-    # elif isinstance(items, dict):
-    #     return [{"label": item[label_key], "value": item[value_key]} for item in items]
-    # else:
-    #     return []
+geo_filters = GeographyFilters(app, auth, id="placename")
 
 # Offcanvas for filters
 offcanvas = dbc.Offcanvas(
@@ -78,6 +65,25 @@ offcanvas = dbc.Offcanvas(
             className="mb-3",
         ),
 
+        dbc.Container([
+            html.H4("Town/City"),
+
+            dbc.Label("Scope"),
+            dcc.Dropdown(
+                id="filter-placename-scope",
+                options=[
+                    {"label": "Birthplace", "value": "birthplace"},
+                    {"label": "Residence", "value": "residence"},
+                    {"label": "Either", "value": "both"}
+                ],
+                value="birthplace",  # ← this makes “Birthplace” the default
+                multi=False,
+                className="mb-3",
+            ),
+
+            geo_filters.layout,
+        ], className="background-light border mb-3"),
+
         dbc.Button("Apply", id="apply-filters", color="primary"),
     ],
     id="offcanvas-filters",
@@ -87,7 +93,8 @@ offcanvas = dbc.Offcanvas(
 )
 
 # Toggle button for offcanvas
-toggle_button = dbc.Button(html.I(className="bi bi-filter me-1"), id="open-offcanvas", n_clicks=0, color="secondary", className="")
+toggle_button = dbc.Button(html.I(className="bi bi-filter me-1"), id="open-offcanvas", n_clicks=0, color="secondary",
+                           className="")
 
 # Data table stub for results
 results_table = dash_table.DataTable(
@@ -109,38 +116,55 @@ results_table = dash_table.DataTable(
 )
 
 download_button = html.Div([
-        html.Button("Download CSV", id="download-csv-btn", className="btn btn-secondary", n_clicks=0),
-        dcc.Download(id="download-csv")
-    ], className="mt-3")
-
+    html.Button("Download CSV", id="download-csv-btn", className="btn btn-secondary", n_clicks=0),
+    dcc.Download(id="download-csv")
+], className="mt-3")
 
 app.layout = html.Div([
-    Navbar([toggle_button]).render(),
-    html.Div([
-        dcc.Location(id="redirect-to", refresh=True),
-        dcc.Interval(
-            id="init-interval",
-            interval=500,  # e.g., 1 second after page load
-            n_intervals=0,
-            max_intervals=1  # This ensures it fires only once
-        ),
+    dcc.Store(id='table-rows-store', data=0),
+    dcc.Location(id="redirect-to", refresh=True),
+    dcc.Interval(
+        id="init-interval",
+        interval=500,  # e.g., 1 second after page load
+        n_intervals=0,
+        max_intervals=1  # This ensures it fires only once
+    ),
+
+    Navbar([]).render(),
+    dbc.Container([
 
         offcanvas,
 
         dbc.Container(
+            dbc.Row(
+                [dbc.Col(html.H2("Registration Search", className="mb-3")),
+                 dbc.Col(toggle_button, width="auto"), ],
+                justify="between",
+                align="center",
+            ),
+        ),
+
+        html.Div(
+            "Use the filters to search the Registration Dataset",
+            id="no-data-msg",
+            className="alert alert-info d-block",
+        ),
+
+        dbc.Container(
             [
-                html.H2("Registration Search", className="mb-3"),
-                # toggle_button,
 
                 results_table,
                 html.Div(Pagination().render(), className="mt-2"),
                 download_button,
             ],
+            id="table-display-container",
             fluid=True,
+            className="d-none",
         )
     ]),
     Footer().render(),
 ])
+
 
 # Callback to toggle offcanvas
 @app.callback(
@@ -180,7 +204,7 @@ def initial_view(n):
         return APP_URL, no_update, no_update, no_update
 
     # campus: label=name, value=id
-    campus_options = fetch_options("/api/registration/campus/", token,"name", "id")
+    campus_options = fetch_options("/api/registration/campus/", token, "name", "id")
 
     # sport org: label=name, value=id
     org_options = fetch_options("/api/registration/organization/", token, "name", "id")
@@ -190,75 +214,59 @@ def initial_view(n):
 
     return no_update, role_options, campus_options, org_options
 
-def restructure_profile(profile):
-    record = {
-        'id': profile['id'],
-     'first_name': profile['person']['first_name'] if profile['person'] else None,
-     'last_name': profile['person']['last_name'] if profile['person'] else None,
-     'email': profile['person']['email'] if profile['person'] else None,
-     'sport': profile['sport']['name'] if profile['sport'] else None,
-     'enrollment_status': profile['current_enrollment']['enrollment_status'] if profile['current_enrollment'] else None
-     }
-
-    return record
-
-def fetch_all_profiles(filters):
-    try:
-        token = auth.get_token()
-    except Exception as e:
-        raise PreventUpdate
-
-    headers = {"Authorization": f"Bearer {token}"}
-    url    = f"{SITE_URL}/api/registration/profile/"
-    params = {**filters, "limit": 100, "offset": 0}  # choose a reasonable chunk size
-    all_records = []
-
-    while url:
-        r = requests.get(url, headers=headers, params=params)
-        r.raise_for_status()
-        payload = r.json()
-        all_records.extend(payload["results"])
-
-        # Move to the next page
-        url = payload.get("next")
-        # Once we switch to using `next`, we no longer need `params`
-        params = None
-
-    return all_records
-
 
 @app.callback(
     Output("download-csv", "data"),
     Input("download-csv-btn", "n_clicks"),
-    State("filter-role",         "value"),
-    State("filter-campus",       "value"),
+    State("filter-role", "value"),
+    State("filter-campus", "value"),
     State("filter-organization", "value"),
+    State("filter-placename-scope", "value"),
+    State(f"{geo_filters.id}-province", "value"),
+    State(f"{geo_filters.id}-location", "value"),
+    State(f"{geo_filters.id}-placename", "value"),
     prevent_initial_call=True,
 )
-def download_csv(n_clicks, role, campus, org):
-    # build the common filter params
-    filters = {}
-    if role:   filters["role_id"]      = role
-    if campus: filters["campus_id"]    = campus
-    if org:    filters["sport_org_id"] = org
+def download_csv(n_clicks, role, campus, org, placename_scope, province, location, placename):
+    try:
+        token = auth.get_token()
 
-    records = [restructure_profile(p) for p in fetch_all_profiles(filters)]
-    df = pd.DataFrame(records)
-    return dcc.send_data_frame(df.to_csv, "filtered_profiles.csv", index=False)
+        # build the common filter params
+        filters = {}
+        if role:   filters["role_id"] = role
+        if campus: filters["campus_id"] = campus
+        if org:    filters["sport_org_id"] = org
+        if placename_scope: filters["geography_scope"] = placename_scope
+        if province: filters["province"] = province
+        if location: filters["location"] = location
+        if placename: filters["placename"] = placename
+
+        records = [restructure_profile(p) for p in fetch_profiles(token, filters)]
+        df = pd.DataFrame(records)
+        return dcc.send_data_frame(df.to_csv, "filtered_profiles.csv", index=False)
+    except Exception as e:
+        print(e)
+        raise PreventUpdate
 
 
 @app.callback(
     Output("results-table", "data"),
     Output("pagination", "max_value"),
     Output("pagination", "active_page"),
+    Output("table-rows-store", "data"),
     Input("apply-filters", "n_clicks"),
     Input("pagination", "active_page"),
-    Input("results-table",      "page_size"),
+    Input("results-table", "page_size"),
     State("filter-role", "value"),
     State("filter-campus", "value"),
     State("filter-organization", "value"),
+    State("filter-placename-scope", "value"),
+    State(f"{geo_filters.id}-province", "value"),
+    State(f"{geo_filters.id}-location", "value"),
+    State(f"{geo_filters.id}-placename", "value"),
 )
-def apply_filters(n_clicks, active_page, page_size, role_id, campus_id, org_id):
+def apply_filters(n_clicks, active_page, page_size, role_id, campus_id, org_id, placename_scope, province, location,
+                  placename):
     try:
         token = auth.get_token()
     except Exception as e:
@@ -280,6 +288,10 @@ def apply_filters(n_clicks, active_page, page_size, role_id, campus_id, org_id):
     params["role_id"] = role_id if role_id else None
     params["campus_id"] = campus_id if campus_id else None
     params["sport_org_id"] = org_id if org_id else None
+    if placename_scope: params["geography_scope"] = placename_scope
+    if province: params["province"] = province
+    if location: params["location"] = location
+    if placename: params["placename"] = placename
 
     params["limit"] = page_size
     params["offset"] = (page - 1) * page_size
@@ -295,7 +307,25 @@ def apply_filters(n_clicks, active_page, page_size, role_id, campus_id, org_id):
     # Return raw JSON as a string
     people_res = [restructure_profile(p) for p in payload.get("results", [])]
 
-    return people_res, total_pages, page
+    return people_res, total_pages, page, len(people_res)
+
+
+@app.callback(
+    Output("no-data-msg", "className"),
+    Output("no-data-msg", "children"),
+    Output("table-display-container", "className"),
+    Input("table-rows-store", "data"),
+)
+def row_callback(rows):
+    print(f"Rows: {rows}")
+
+    if not rows:
+        rv = "alert alert-warning d-block", "No Rows Found!", "d-none"
+    else:
+        rv = "d-none", "", ""
+
+    return rv
+
 
 if __name__ == "__main__":
     app.run(debug=True, port=8050)
