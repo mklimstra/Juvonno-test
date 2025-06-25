@@ -1,3 +1,5 @@
+import dash
+import flask
 from dash_auth_external import DashAuthExternal
 import pandas as pd
 from dash.exceptions import PreventUpdate
@@ -5,6 +7,8 @@ from dash import Dash, Input, Output, html, dcc, no_update, dash_table, State, c
 import dash_bootstrap_components as dbc
 import requests
 import math
+
+from layout import Footer, Navbar, Pagination
 
 from settings import *
 
@@ -19,19 +23,33 @@ server = (
 )  # retrieving the flask server which has our redirect rules assigned
 
 
+here = os.path.dirname(os.path.abspath(__file__))
+assets_path = os.path.join(here, "assets")
+server.static_folder    = assets_path
+server.static_url_path  = "/assets"
+
+
 # Initialize the Dash app
 app = Dash(__name__,
            server=server,
-           external_stylesheets=[dbc.themes.BOOTSTRAP])
+
+           external_stylesheets=[dbc.themes.BOOTSTRAP,
+                                 "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css"])
 
 def fetch_options(path, token, label_key, value_key, limit=1000):
     headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(f"{SITE_URL}{path}", params={"limit": limit}, headers=headers, timeout=5)
     resp.raise_for_status()
     items = resp.json()["results"]
+
     return [{"label": item[label_key], "value": item[value_key]} for item in items]
 
-
+    # if isinstance(items,list):
+    #     return [{"label": item, "value": item} for item in items]
+    # elif isinstance(items, dict):
+    #     return [{"label": item[label_key], "value": item[value_key]} for item in items]
+    # else:
+    #     return []
 
 # Offcanvas for filters
 offcanvas = dbc.Offcanvas(
@@ -65,11 +83,11 @@ offcanvas = dbc.Offcanvas(
     id="offcanvas-filters",
     title="Filters",
     is_open=False,
-    placement="start",
+    placement="end",
 )
 
 # Toggle button for offcanvas
-toggle_button = dbc.Button("Filters", id="open-offcanvas", n_clicks=0, color="secondary", className="mb-3")
+toggle_button = dbc.Button(html.I(className="bi bi-filter me-1"), id="open-offcanvas", n_clicks=0, color="secondary", className="")
 
 # Data table stub for results
 results_table = dash_table.DataTable(
@@ -90,39 +108,39 @@ results_table = dash_table.DataTable(
     style_cell={"textAlign": "left"},
 )
 
-pagination = dbc.Pagination(
-    id="pagination",
-    max_value=1,
-    active_page=1,
-    fully_expanded=False,
-    previous_next=True,
-)
-
 download_button = html.Div([
-        html.Button("Download CSV", id="download-csv-btn", n_clicks=0),
+        html.Button("Download CSV", id="download-csv-btn", className="btn btn-secondary", n_clicks=0),
         dcc.Download(id="download-csv")
     ], className="mt-3")
 
-# App layout
-app.layout = html.Div([
-    dcc.Location(id="redirect-to", refresh=True),
-    dcc.Interval(
-        id="init-interval",
-        interval=500,  # e.g., 1 second after page load
-        n_intervals=0,
-        max_intervals=1   # This ensures it fires only once
-    ),
 
-    dbc.Container(
-    [
-        toggle_button,
+app.layout = html.Div([
+    Navbar([toggle_button]).render(),
+    html.Div([
+        dcc.Location(id="redirect-to", refresh=True),
+        dcc.Interval(
+            id="init-interval",
+            interval=500,  # e.g., 1 second after page load
+            n_intervals=0,
+            max_intervals=1  # This ensures it fires only once
+        ),
+
         offcanvas,
-        results_table,
-        html.Div(pagination, className="mt-2"),
-        download_button,
-    ],
-    fluid=True,
-)])
+
+        dbc.Container(
+            [
+                html.H2("Registration Search", className="mb-3"),
+                # toggle_button,
+
+                results_table,
+                html.Div(Pagination().render(), className="mt-2"),
+                download_button,
+            ],
+            fluid=True,
+        )
+    ]),
+    Footer().render(),
+])
 
 # Callback to toggle offcanvas
 @app.callback(
