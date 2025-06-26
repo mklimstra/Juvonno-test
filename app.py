@@ -41,6 +41,19 @@ geo_filters = GeographyFilters(app, auth, id="placename")
 # Offcanvas for filters
 offcanvas = dbc.Offcanvas(
     [
+        dbc.Label("Format"),
+        dcc.Dropdown(
+            id="data-format-select",
+            options=[
+                {"label": "Profile", "value": "profile"},
+                {"label": "Contact", "value": "contact"},
+                {"label": "Social", "value": "social"},
+            ],
+            value="profile",  # ← this makes “Birthplace” the default
+            multi=False,
+            className="mb-3",
+        ),
+
         dbc.Label("Role"),
         dcc.Dropdown(
             id="filter-role",
@@ -66,7 +79,7 @@ offcanvas = dbc.Offcanvas(
         ),
 
         dbc.Container([
-            html.H4("Town/City"),
+            html.H6("Town/City"),
 
             dbc.Label("Scope"),
             dcc.Dropdown(
@@ -84,7 +97,7 @@ offcanvas = dbc.Offcanvas(
             geo_filters.layout,
         ], className="background-light border mb-3"),
 
-        dbc.Button("Apply", id="apply-filters", color="primary"),
+        dbc.Button("Apply/Retrieve", id="apply-filters", color="primary"),
     ],
     id="offcanvas-filters",
     title="Filters",
@@ -138,7 +151,8 @@ app.layout = html.Div([
         dbc.Container(
             dbc.Row(
                 [dbc.Col(html.H2("Registration Search", className="mb-3")),
-                 dbc.Col(toggle_button, width="auto"), ],
+                 dbc.Col(
+                     toggle_button, width="auto"), ],
                 justify="between",
                 align="center",
             ),
@@ -225,9 +239,10 @@ def initial_view(n):
     State(f"{geo_filters.id}-province", "value"),
     State(f"{geo_filters.id}-location", "value"),
     State(f"{geo_filters.id}-placename", "value"),
+    State("data-format-select", "value"),
     prevent_initial_call=True,
 )
-def download_csv(n_clicks, role, campus, org, placename_scope, province, location, placename):
+def download_csv(n_clicks, role, campus, org, placename_scope, province, location, placename, format):
     try:
         token = auth.get_token()
 
@@ -241,7 +256,7 @@ def download_csv(n_clicks, role, campus, org, placename_scope, province, locatio
         if location: filters["location"] = location
         if placename: filters["placename"] = placename
 
-        records = [restructure_profile(p) for p in fetch_profiles(token, filters)]
+        records = [restructure_profile(p, format) for p in fetch_profiles(token, filters)]
         df = pd.DataFrame(records)
         return dcc.send_data_frame(df.to_csv, "filtered_profiles.csv", index=False)
     except Exception as e:
@@ -251,6 +266,7 @@ def download_csv(n_clicks, role, campus, org, placename_scope, province, locatio
 
 @app.callback(
     Output("results-table", "data"),
+    Output("results-table", "columns"),
     Output("pagination", "max_value"),
     Output("pagination", "active_page"),
     Output("table-rows-store", "data"),
@@ -264,9 +280,10 @@ def download_csv(n_clicks, role, campus, org, placename_scope, province, locatio
     State(f"{geo_filters.id}-province", "value"),
     State(f"{geo_filters.id}-location", "value"),
     State(f"{geo_filters.id}-placename", "value"),
+    State("data-format-select", "value"),
 )
 def apply_filters(n_clicks, active_page, page_size, role_id, campus_id, org_id, placename_scope, province, location,
-                  placename):
+                  placename, format):
     try:
         token = auth.get_token()
     except Exception as e:
@@ -305,9 +322,11 @@ def apply_filters(n_clicks, active_page, page_size, role_id, campus_id, org_id, 
     total_pages = math.ceil(total / page_size) if total else 1
 
     # Return raw JSON as a string
-    people_res = [restructure_profile(p) for p in payload.get("results", [])]
+    people_res = [restructure_profile(p, format) for p in payload.get("results", [])]
+    df = pd.DataFrame(people_res)
+    columns = [{"name": col, "id": col} for col in df.columns]
 
-    return people_res, total_pages, page, len(people_res)
+    return df.to_dict("records"), columns, total_pages, page, len(people_res)
 
 
 @app.callback(
@@ -317,10 +336,10 @@ def apply_filters(n_clicks, active_page, page_size, role_id, campus_id, org_id, 
     Input("table-rows-store", "data"),
 )
 def row_callback(rows):
-    print(f"Rows: {rows}")
+    # print(f"Rows: {rows}")
 
     if not rows:
-        rv = "alert alert-warning d-block", "No Rows Found!", "d-none"
+        rv = "alert alert-warning d-block", "No Records Found. Adjust your filters and try again.", "d-none"
     else:
         rv = "d-none", "", ""
 

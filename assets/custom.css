@@ -1,0 +1,4 @@
+/* reserve room for a 60px-tall fixed footer */
+body {
+  padding-bottom: 100px;  /* ← adjust to your footer’s actual height */
+}

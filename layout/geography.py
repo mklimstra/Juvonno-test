@@ -91,8 +91,6 @@ class GeographyFilters:
 
                 params = {}
 
-                print("CITIES")
-
                 if location: params['location']= location
                 if province: params['province_territory']= province
 
