@@ -62,15 +62,14 @@ def restructure_profile(profile, format='profile'):
             'last_name': profile['person']['last_name'] if profile['person'] else None,
             'email': profile['person']['email'] if profile['person'] else None,
             'sport': profile['sport']['name'] if profile['sport'] else None,
-            'org': profile['current_nomination']['organization']['name'] if profile['current_nomination'] else None,
+            'org':None,
             'dob' :profile['person']['dob'] if profile['person'] else None,
             'majority_age': profile['person']['majority_age'] if profile['person'] else None,
             # 'enrollment_status': profile['current_enrollment']['enrollment_status'] if profile[
             #     'current_enrollment'] else None
 
-            'birthplace':f"{profile['birth_city']['name_ascii']}, {profile['birth_city']['province_territory']}" if profile['birth_city'] else None,
-            'residence': f"{profile['residence_city']['name_ascii']}, {profile['residence_city']['province_territory']}" if
-            profile['residence_city'] else None,
+            'birthplace':f"{profile['birth_city']['name_ascii']}, {profile['birth_city']['province_territory']}" if 'birth_city' in profile and profile['birth_city'] else None,
+            'residence': f"{profile['residence_city']['name_ascii']}, {profile['residence_city']['province_territory']}" if 'residence_city' in profile and profile['residence_city'] else None,
 
             'enrollment_expiry': profile['current_enrollment']['end_date'] if profile[
                 'current_enrollment'] else None
@@ -82,7 +81,7 @@ def restructure_profile(profile, format='profile'):
             'last_name': profile['person']['last_name'] if profile['person'] else None,
             'email': profile['person']['email'] if profile['person'] else None,
             'sport': profile['sport']['name'] if profile['sport'] else None,
-            'org': profile['current_nomination']['organization']['name'] if profile['current_nomination'] else None,
+            'org': None,
             'dob': profile['person']['dob'] if profile['person'] else None,
             'majority_age': profile['person']['majority_age'] if profile['person'] else None,
             'guardian': f"{profile['person']['guardian']['first_name']} {profile['person']['guardian']['last_name']}" if profile['person']['guardian'] else None,
@@ -97,10 +96,16 @@ def restructure_profile(profile, format='profile'):
             'last_name': profile['person']['last_name'] if profile['person'] else None,
             'email': profile['person']['email'] if profile['person'] else None,
             'sport': profile['sport']['name'] if profile['sport'] else None,
+            'org':None,
         }
 
         if profile['person']['social_media_accounts']:
             for act in profile['person']['social_media_accounts']:
                 record[act['platform']] = act['username']
+
+    if profile['role_slug'] == 'staff':
+        record['org'] = profile['organization']['name'] if profile['organization'] else None
+    else:
+        record['org'] = profile['current_nomination']['organization']['name'] if profile['current_nomination'] else None
 
     return record
