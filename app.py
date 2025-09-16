@@ -209,8 +209,6 @@ def initial_view(n):
 
         ## HERE, HOW DO I FORWARD A REDIRECT TO APP_URL???
 
-        print(e)
-
         auth_url = f"{AUTH_URL}?response_type=code&client_id={CLIENT_ID}&redirect_uri={APP_URL}"
 
         print(f"Forward to {APP_URL}")
@@ -347,4 +345,4 @@ def row_callback(rows):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=8050)
+    app.run(debug=False, port=8050)
