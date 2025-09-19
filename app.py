@@ -135,40 +135,22 @@ def initial_view(n):
     Output("navbar-user", "children"),
     Input("init-interval", "n_intervals"),
     Input("user-refresh", "n_intervals"),
-    State("navbar-user", "children"),
     prevent_initial_call=False
 )
-def show_current_user(_n1, _n2, current_children):
-    """
-    Rules:
-    - If we have a token: show "Signed in as …".
-    - If we don't have a token: show "Sign in" *only* if there's no current label.
-      (Prevents flicker when the token becomes available a split-second later.)
-    - If /me fails temporarily: keep the previous label instead of flipping to "Sign in".
-    """
+def show_current_user(_n1, _n2):
     try:
         token = auth.get_token()
-    except Exception:
-        token = None
-
-    # Helper for the link
-    sign_in_link = html.A("Sign in", href="login", className="link-light text-decoration-none")
-
-    if not token:
-        # If no token yet (e.g., right at load) but we already had a label, keep it.
-        return current_children if current_children else sign_in_link
-
-    # We have a token → fetch identity
-    try:
+        if not token:
+            # graceful fallback
+            return html.A("Sign in", href="login", className="link-light text-decoration-none")
         r = requests.get(
             f"{SITE_URL}/api/csiauth/me/",
             headers={"Authorization": f"Bearer {token}"},
             timeout=6
         )
         if r.status_code != 200:
-            # Don't downgrade to "Sign in" if we had a label already; prompt reauth otherwise.
-            return current_children if current_children else html.A("Re-authenticate", href="login",
-                                                                    className="link-light text-decoration-none")
+            # show a hint instead of going blank (401/timeout/etc.)
+            return html.A("Re-authenticate", href="login", className="link-light text-decoration-none")
 
         me = r.json() or {}
         name  = me.get("name") or me.get("display_name") or me.get("full_name") \
@@ -176,11 +158,8 @@ def show_current_user(_n1, _n2, current_children):
         email = me.get("email") or (me.get("user") or {}).get("email")
         label = f"Signed in as {name} ({email})" if (name and email) else f"Signed in as {name or email or 'user'}"
         return label
-
     except Exception:
-        # Network blip: keep whatever was showing rather than flashing "Sign in"
-        return current_children if current_children else sign_in_link
-
+        return html.A("Sign in", href="login", className="link-light text-decoration-none")
 
 
 # Wire up the training dashboard’s internal callbacks
