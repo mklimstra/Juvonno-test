@@ -212,12 +212,6 @@ app.layout = html.Div([
     Footer().render(),
 ])
 
-# 2) Bring in your dashboard content & callbacks
-from training_dashboard import layout_body, register_callbacks
-
-
-# Register all dashboard callbacks
-register_callbacks(app)
 # ------------------------- Callbacks -------------------------
 # Toggle filters panel
 @app.callback(
