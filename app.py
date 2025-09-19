@@ -212,7 +212,34 @@ app.layout = html.Div([
     Footer().render(),
 ])
 
+# 2) Bring in your dashboard content & callbacks
+from training_dashboard import layout_body, register_callbacks
 
+# 3) Dash app — the repo’s assets/ CSS will autoload if you copied that folder
+external_stylesheets = [dbc.themes.FLATLY]
+app = dash.Dash(__name__, external_stylesheets=external_stylesheets, suppress_callback_exceptions=True)
+server = app.server
+
+# Optional OAuth vars (wire like the repo if desired)
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+APP_URL = os.getenv("APP_URL")
+SITE_URL = os.getenv("SITE_URL")
+
+app.layout = html.Div([
+    dcc.Location(id="url"),
+    make_header(active_title="CSI Apps — Training Status"),
+    html.Main(id="page-content", className="container-fluid my-3", children=[layout_body()]),
+    make_footer(),
+])
+
+# If you later add OAuth like the Registration Viewer, handle redirects here.
+@app.callback(Output("page-content", "children"), Input("url", "href"), prevent_initial_call=False)
+def router(_href):
+    return layout_body()
+
+# Register all dashboard callbacks
+register_callbacks(app)
 # ------------------------- Callbacks -------------------------
 # Toggle filters panel
 @app.callback(
