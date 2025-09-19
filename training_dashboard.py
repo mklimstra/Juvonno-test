@@ -346,7 +346,7 @@ CARD_STYLE = {"overflow": "hidden", "border": "1px solid #e9ecef", "borderRadius
 # ────────── Public layout builder ──────────
 def layout_body():
     return dbc.Container([
-        html.H3("Choose Training Group", className="mt-1"),
+        html.H3("Training Group", className="mt-1"),
 
         # Filters / selection
         dbc.Row([
