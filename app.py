@@ -215,15 +215,6 @@ app.layout = html.Div([
 # 2) Bring in your dashboard content & callbacks
 from training_dashboard import layout_body, register_callbacks
 
-# 3) Dash app — the repo’s assets/ CSS will autoload if you copied that folder
-external_stylesheets = [dbc.themes.FLATLY]
-app = dash.Dash(__name__, external_stylesheets=external_stylesheets, suppress_callback_exceptions=True)
-server = app.server
-
-# If you later add OAuth like the Registration Viewer, handle redirects here.
-@app.callback(Output("page-content", "children"), Input("url", "href"), prevent_initial_call=False)
-def router(_href):
-    return layout_body()
 
 # Register all dashboard callbacks
 register_callbacks(app)
