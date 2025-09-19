@@ -1,6 +1,6 @@
 # training_dashboard.py — dashboard content + callbacks
 from __future__ import annotations
-import os, sqlite3, requests, functools, traceback
+import os, sqlite3, requests, functools, traceback, re  # <-- re added
 from datetime import datetime
 from typing import Dict, List, Union, Iterable, Tuple, Optional
 
@@ -20,9 +20,16 @@ except ImportError:
 import plotly.graph_objects as go
 
 # ────────── API config ──────────
-API_KEY = os.getenv("JUV_API_KEY", "6e94ea1a2a2e2742b6d8511957ffee10ee574d5e")
+# MINIMAL CHANGE: remove hard-coded default; require env var on Posit
+API_KEY = os.getenv("JUV_API_KEY")
 BASE    = "https://csipacific.juvonno.com/api"
 HEADERS = {"accept": "application/json"}
+
+def _require_api_key():
+    if not API_KEY:
+        raise RuntimeError(
+            "Missing JUV_API_KEY. Set it in your deployment environment (e.g., Posit Connect → Variables)."
+        )
 
 def _get(path: str, **params):
     params.setdefault("api_key", API_KEY)
@@ -89,6 +96,8 @@ def fetch_customers_full() -> Dict[int, Dict]:
         page += 1
     return {c["id"]: c for c in out if c.get("id")}
 
+# Require API key before any network I/O
+_require_api_key()
 CUSTOMERS = fetch_customers_full()
 
 def groups_of(cust: Dict) -> List[str]:
@@ -458,7 +467,7 @@ def register_callbacks(app: dash.Dash):
     def toggle_table(n, is_open):
         new = _toggle(is_open); return new, _sym(new), _hdr_style(new)
 
-    # ① Load groups → Customer checklist
+    # ① Load groups → Athlete selector (Dropdown, single-select)
     @app.callback(
         Output("customer-checklist-container", "children"),
         Output("msg", "children"), Output("msg", "is_open"),
@@ -466,7 +475,7 @@ def register_callbacks(app: dash.Dash):
         State("grp", "value"),
         prevent_initial_call=True,
     )
-    def make_customer_checklist(n_clicks, groups_raw):
+    def make_customer_selector(n_clicks, groups_raw):
         if not groups_raw:
             return no_update, "Select at least one group.", True
         targets = {_norm(g) for g in groups_raw}
@@ -477,13 +486,17 @@ def register_callbacks(app: dash.Dash):
         ]
         if not matching:
             return html.Div("No patients in those groups."), "", False
-        checklist = dbc.Checklist(
-            id="cust-buttons", options=matching, value=[],
-            inline=False, switch=False, style={"flexDirection": "column"},
+        selector = dcc.Dropdown(
+            id="cust-select",
+            options=matching,
+            value=None,
+            placeholder="Select athlete…",
+            clearable=False,
+            style={"maxWidth": 420},
         )
-        return checklist, "", False
+        return selector, "", False
 
-    # ② Selection → Calendar + Table + Complaint Focus
+    # ② Selection → Calendar + Table + Complaint Focus (single athlete)
     @app.callback(
         Output("calendar-heatmap-container", "children"),
         Output("appointment-table-container", "children"),
@@ -492,55 +505,55 @@ def register_callbacks(app: dash.Dash):
         Output("focus-complaint", "value"),
         Output("msg", "children", allow_duplicate=True),
         Output("msg", "is_open", allow_duplicate=True),
-        Input("cust-buttons", "value"),
+        Input("cust-select", "value"),
         State("focus-complaint", "value"),
         prevent_initial_call=True,
     )
-    def show_calendar_and_table(selected_cids, previously_focused):
+    def show_calendar_and_table(selected_cid, previously_focused):
         try:
-            if not selected_cids:
-                return "", html.Div("Select one or more customers."), {}, [], None, "", False
+            if not selected_cid:
+                return "", html.Div("Select an athlete."), {}, [], None, "", False
 
             rows = []
             id_to_label = {}
             appointment_complaints: set[str] = set()
             customer_complaints_union: set[str] = set()
 
-            for cid in selected_cids:
-                cust = CUSTOMERS.get(cid, {})
-                label = f"{cust.get('first_name','')} {cust.get('last_name','')} (ID {cid})".strip()
-                id_to_label[cid] = label
+            cid = int(selected_cid)
+            cust = CUSTOMERS.get(cid, {})
+            label = f"{cust.get('first_name','')} {cust.get('last_name','')} (ID {cid})".strip()
+            id_to_label[cid] = label
 
-                # Customer-level complaints (ensures items like "knee" appear)
-                for c in fetch_customer_complaints(cid):
-                    n = (c.get("Title") or "").strip()
-                    if n: customer_complaints_union.add(n)
+            # Customer-level complaints
+            for c in fetch_customer_complaints(cid):
+                n = (c.get("Title") or "").strip()
+                if n: customer_complaints_union.add(n)
 
-                # Appointments + all complaints
-                for ap in CID_TO_APPTS.get(cid, []):
-                    aid = ap.get("id")
-                    date_str = tidy_date_str(ap.get("date"))
-                    eids = encounter_ids_for_appt(aid)
-                    max_eid = max(eids) if eids else None
-                    status = extract_training_status(fetch_encounter(max_eid)) if max_eid else ""
+            # Appointments + complaints
+            for ap in CID_TO_APPTS.get(cid, []):
+                aid = ap.get("id")
+                date_str = tidy_date_str(ap.get("date"))
+                eids = encounter_ids_for_appt(aid)
+                max_eid = max(eids) if eids else None
+                status = extract_training_status(fetch_encounter(max_eid)) if max_eid else ""
 
-                    names: List[str] = []
-                    for rec in list_complaints_for_appt(aid):
-                        nm = _extract_name(rec)
-                        if nm: names.append(nm)
-                    comp_inline = ap.get("complaint")
-                    if isinstance(comp_inline, dict):
-                        nm = _extract_name(comp_inline)
-                        if nm: names.append(nm)
+                names: List[str] = []
+                for rec in list_complaints_for_appt(aid):
+                    nm = _extract_name(rec)
+                    if nm: names.append(nm)
+                comp_inline = ap.get("complaint")
+                if isinstance(comp_inline, dict):
+                    nm = _extract_name(comp_inline)
+                    if nm: names.append(nm)
 
-                    names = sorted(set(n.strip() for n in names if n.strip()))
-                    if names: appointment_complaints.update(names)
+                names = sorted(set(n.strip() for n in names if n.strip()))
+                if names: appointment_complaints.update(names)
 
-                    rows.append({
-                        "Date":            date_str,
-                        "Training Status": status,
-                        "Complaint Names": "; ".join(names) if names else "",
-                    })
+                rows.append({
+                    "Date":            date_str,
+                    "Training Status": status,
+                    "Complaint Names": "; ".join(names) if names else "",
+                })
 
             # Build union
             all_names = sorted({n for n in (appointment_complaints | customer_complaints_union) if n})
@@ -562,7 +575,7 @@ def register_callbacks(app: dash.Dash):
             work = df.copy()
             if focus_value and focus_value != "__ALL__":
                 mask = work["Complaint Names"].str.contains(
-                    rf"(^|;\s*){pd.regex.escape(focus_value)}($|;\s*)", case=False, na=False
+                    rf"(^|;\s*){re.escape(focus_value)}($|;\s*)", case=False, na=False  # <-- re.escape
                 )
                 work = work[mask].copy()
 
