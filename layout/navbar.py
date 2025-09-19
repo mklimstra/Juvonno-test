@@ -19,7 +19,7 @@ class Navbar():
                     dbc.NavbarBrand(
                         [
                             html.Img(src="assets/img/csi-pacific-logo-reverse.png", height="40px"),
-                            html.Span("CSI Pacific APPS Registration", className="ms-2 h5 mb-0")
+                            html.Span("Athlete Training Status", className="ms-2 h5 mb-0")
                         ],
                         href="#",
                         className="d-flex align-items-center text-white text-decoration-none"
