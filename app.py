@@ -19,6 +19,8 @@ from layout import Footer, Navbar, Pagination, GeographyFilters
 from settings import *  # expects AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLIENT_SECRET
 from utils import fetch_options, fetch_profiles, restructure_profile
 
+# ⬇️ NEW: bring in your training dashboard (no changes to it)
+from training_dashboard import layout_body as training_layout_body, register_callbacks as training_register_callbacks
 
 # ------------------------- DashAuthExternal / Flask server -------------------------
 auth = DashAuthExternal(
@@ -55,19 +57,16 @@ def login():
     Redirect URI MUST match what you registered in the OAuth app, and must match
     what DashAuthExternal will use during the token exchange.
     """
-    # Use configured APP_URL so it exactly matches the provider-registered value.
-    # (APP_URL should be set to your public Connect base, e.g. https://connect.posit.cloud/content/<id>)
     app_base = APP_URL.rstrip("/")
     redirect_uri = f"{app_base}/redirect"   # DashAuthExternal default callback path
 
-    # --- PKCE + state ---
     verifier  = _b64url(secrets.token_bytes(32))
     challenge = _b64url(hashlib.sha256(verifier.encode("ascii")).digest())
     state     = _b64url(secrets.token_bytes(16))
 
     session["cv"] = verifier
     session["st"] = state
-    session["redirect_uri"] = redirect_uri  # helpful for the library
+    session["redirect_uri"] = redirect_uri
 
     params = {
         "response_type": "code",
@@ -93,7 +92,7 @@ app = Dash(
 
 geo_filters = GeographyFilters(app, auth, id="placename")
 
-# Offcanvas for filters
+# Offcanvas for filters (Registration page)
 offcanvas = dbc.Offcanvas(
     [
         dbc.Label("Format"),
@@ -152,7 +151,7 @@ toggle_button = dbc.Button(
     className="",
 )
 
-# Results table
+# Results table (Registration page)
 results_table = dash_table.DataTable(
     id="results-table",
     columns=[
@@ -175,45 +174,64 @@ download_button = html.Div([
     dcc.Download(id="download-csv")
 ], className="mt-3")
 
+# ------------------------- Registration page content -------------------------
+registration_content = dbc.Container([
+    offcanvas,
+    dbc.Container(
+        dbc.Row(
+            [dbc.Col(html.H2("Registration Search", className="mb-3")),
+             dbc.Col(toggle_button, width="auto")],
+            justify="between",
+            align="center",
+        ),
+    ),
+
+    html.Div(
+        "Use the filters to search the Registration Dataset",
+        id="no-data-msg",
+        className="alert alert-info d-block",
+    ),
+
+    dbc.Container(
+        [
+            results_table,
+            html.Div(Pagination().render(), className="mt-2"),
+            download_button,
+        ],
+        id="table-display-container",
+        fluid=True,
+        className="d-none",
+    )
+], fluid=True)
+
+# ------------------------- LAYOUT: add a tab for Training Status (minimal change) -------------------------
 app.layout = html.Div([
     dcc.Store(id='table-rows-store', data=0),
     dcc.Location(id="redirect-to", refresh=True),
     dcc.Interval(id="init-interval", interval=500, n_intervals=0, max_intervals=1),
 
     Navbar([]).render(),
-    dbc.Container([
-        offcanvas,
-        dbc.Container(
-            dbc.Row(
-                [dbc.Col(html.H2("Registration Search", className="mb-3")),
-                 dbc.Col(toggle_button, width="auto")],
-                justify="between",
-                align="center",
-            ),
-        ),
 
-        html.Div(
-            "Use the filters to search the Registration Dataset",
-            id="no-data-msg",
-            className="alert alert-info d-block",
-        ),
-
-        dbc.Container(
+    # ⬇️ Two tabs: keep Registration as-is; add Training Status in second tab
+    dbc.Container(
+        dbc.Tabs(
             [
-                results_table,
-                html.Div(Pagination().render(), className="mt-2"),
-                download_button,
+                dbc.Tab(registration_content, label="Registration", tab_id="tab-registration", active_label_class_name="fw-semibold"),
+                dbc.Tab(dbc.Container(training_layout_body(), fluid=True),
+                        label="Training Status", tab_id="tab-training", active_label_class_name="fw-semibold"),
             ],
-            id="table-display-container",
-            fluid=True,
-            className="d-none",
-        )
-    ]),
+            id="main-tabs",
+            active_tab="tab-registration",
+            className="mt-3"
+        ),
+        fluid=True
+    ),
+
     Footer().render(),
 ])
 
 # ------------------------- Callbacks -------------------------
-# Toggle filters panel
+# Toggle filters panel (Registration)
 @app.callback(
     Output("offcanvas-filters", "is_open"),
     Input("open-offcanvas", "n_clicks"),
@@ -224,8 +242,7 @@ def toggle_offcanvas(n_clicks, is_open):
         return not is_open
     return is_open
 
-
-# Silent init: if no token, bounce to /login; else populate dropdowns
+# Silent init: if no token, bounce to /login; else populate dropdowns (Registration)
 @app.callback(
     Output("redirect-to", "href"),
     Output("filter-role", "options"),
@@ -245,20 +262,15 @@ def initial_view(n):
         token = None
 
     if not token:
-        # relative path keeps Connect's prefix (/content/<id>) intact
         return "login", no_update, no_update, no_update
 
-    # campus: label=name, value=id
     campus_options = fetch_options("/api/registration/campus/", token, "name", "id")
-    # sport org: label=name, value=id
     org_options    = fetch_options("/api/registration/organization/", token, "name", "id")
-    # role: label=verbose_name, value=id
     role_options   = fetch_options("/api/registration/role/", token, "verbose_name", "id")
 
     return no_update, role_options, campus_options, org_options
 
-
-# Download CSV of all results for current filters
+# Download CSV (Registration)
 @app.callback(
     Output("download-csv", "data"),
     Input("download-csv-btn", "n_clicks"),
@@ -294,8 +306,7 @@ def download_csv(n_clicks, role, campus, org, placename_scope, province, locatio
         print("download_csv error:", e)
         raise PreventUpdate
 
-
-# Apply filters + pagination
+# Apply filters + pagination (Registration)
 @app.callback(
     Output("results-table", "data"),
     Output("results-table", "columns"),
@@ -364,8 +375,7 @@ def apply_filters(n_clicks, active_page, page_size, role_id, campus_id, org_id,
 
     return df.to_dict("records"), columns, total_pages, page, len(rows)
 
-
-# Show/hide “no data” banner
+# Show/hide “no data” banner (Registration)
 @app.callback(
     Output("no-data-msg", "className"),
     Output("no-data-msg", "children"),
@@ -378,6 +388,8 @@ def row_callback(rows):
     else:
         return "d-none", "", ""
 
+# ⬇️ NEW: register all callbacks from your Training Status dashboard
+training_register_callbacks(app)
 
 if __name__ == "__main__":
     # Locally you can run on 8050; on Connect, the launcher takes over.
