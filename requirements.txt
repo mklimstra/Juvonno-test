@@ -3,3 +3,7 @@ dash-auth-external
 python-dotenv
 pandas
 dash_bootstrap_components
+plotly>=5.20
+numpy>=1.24
+requests>=2.31
+plotly-calplot>=0.1.20
