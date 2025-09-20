@@ -5,8 +5,9 @@ import sqlite3
 import dash
 from dash_auth_external import DashAuthExternal
 from dash.exceptions import PreventUpdate
-from dash import Dash, Input, Output, html, dcc, no_update, dash_table, State, callback_context
+from dash import Dash, Input, Output, html, dcc, no_update, State, callback_context
 import dash_bootstrap_components as dbc
+import dash_ag_grid as dag  # NEW
 
 # PKCE + login helpers
 import base64, hashlib, secrets
@@ -28,6 +29,7 @@ from training_dashboard import (
 )
 
 import pandas as pd
+from datetime import datetime
 
 # ------------------------- Auth / Server -------------------------
 auth = DashAuthExternal(
@@ -131,28 +133,17 @@ def db2_list_for_athlete(athlete_id: int):
 
 # ------------------------- Helpers (Tab 1) -------------------------
 def current_training_status_for_cid(cid: int) -> str:
-    """Forward-filled latest training status for a customer, based on your existing logic."""
+    """Best-effort forward-fill latest status (kept minimal to avoid reaching into private internals)."""
     appts = CID_TO_APPTS.get(cid, [])
-    if not appts:
-        return ""
     rows = []
     for ap in appts:
         aid = ap.get("id")
         dt = pd.to_datetime(tidy_date_str(ap.get("date")), errors="coerce")
-        if pd.isna(dt): continue
-        eids = encounter_ids_for_appt(aid)
-        max_eid = max(eids) if eids else None
-        s = extract_training_status({}) if not max_eid else extract_training_status(
-            # fetch_encounter is used inside extract in training_dashboard; here we only have the id list.
-            # BUT training_dashboard.fetch_encounter is not exported; the training dash callback uses it internally.
-            # So we compute status via encounter ids + training_dashboard’s extract helper when available in callbacks.
-            # For Tab 1 summary, we’ll simply skip when no status can be derived.
-            # (This keeps changes minimal; Tab 2 still shows the precise status calendar.)
-            {}  # no payload here; status will be "" unless you extend export of fetch_encounter.
-        )
-        # Since we can't call fetch_encounter here without importing internal, use empty → status ""
-        # Fallback: If appointment has inline complaint with "status", it won't be the training status; we leave blank.
-        if s: rows.append((dt.normalize(), s))
+        if pd.isna(dt): 
+            continue
+        # NOTE: Without importing fetch_encounter here, we can’t derive status reliably → keep blank.
+        # Tab 2 remains the source of truth for detailed status.
+        # If you want exact parity, export fetch_encounter from training_dashboard and call it here.
     if not rows:
         return ""
     df_s = pd.DataFrame(rows, columns=["Date", "Status"]).sort_values("Date")
@@ -187,17 +178,19 @@ app = Dash(
 
 # ------------------------- Layout -------------------------
 def tab1_layout():
-    """Athlete Summary & Notes"""
+    """Athlete Summary & Notes (AG Grid version)"""
     return dbc.Container([
         html.H3("Athlete Summary & Notes", className="mt-1"),
 
         dbc.Row([
             dbc.Col(dcc.Dropdown(id="t1-groups", options=GROUP_OPTS, multi=True,
                                  placeholder="Select patient group(s)…"), md=6),
-            dbc.Col(dbc.Button("Load", id="t1-load", color="primary", className="w-100"), md=2)
+            dbc.Col(dbc.Button("Load", id="t1-load", color="primary", className="w-100"), md=2),
+            dbc.Col(dcc.Input(id="t1-quick-filter", placeholder="Search table…", type="text",
+                              className="form-control"), md=4)
         ], className="g-2"),
 
-        html.Div(id="t1-table-container", className="mt-3"),
+        html.Div(id="t1-grid-container", className="mt-3"),
 
         dbc.Row([
             dbc.Col([
@@ -222,30 +215,31 @@ def tab1_layout():
 
         html.Hr(),
         html.H5("Comment History"),
-        dash_table.DataTable(
-            id="t1-comments-table",
-            columns=[
-                {"name":"Date","id":"Date"},
-                {"name":"Author","id":"Author"},
-                {"name":"Athlete","id":"Athlete"},
-                {"name":"Complaint","id":"Complaint"},
-                {"name":"Complaint Status","id":"Complaint Status"},
-                {"name":"Comment","id":"Comment"}
+        dag.AgGrid(
+            id="t1-comments-grid",
+            columnDefs=[
+                {"headerName": "Date", "field": "Date", "filter": True, "sortable": True},
+                {"headerName": "Author", "field": "Author", "filter": True, "sortable": True},
+                {"headerName": "Athlete", "field": "Athlete", "filter": True, "sortable": True},
+                {"headerName": "Complaint", "field": "Complaint", "filter": True, "sortable": True},
+                {"headerName": "Complaint Status", "field": "Complaint Status", "filter": True, "sortable": True},
+                {"headerName": "Comment", "field": "Comment", "filter": True, "wrapText": True, "autoHeight": True},
             ],
-            data=[],
-            page_size=10,
-            filter_action="native",
-            sort_action="native",
-            style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","borderBottom":"1px solid #e9ecef"},
-            style_cell={"padding":"9px","fontSize":14,
-                        "fontFamily":"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
-                        "textAlign":"left"},
-            style_data={"borderBottom":"1px solid #eceff4"},
-            style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#fbfbfd"}],
+            rowData=[],
+            defaultColDef={
+                "resizable": True,
+                "filter": True,
+                "sortable": True,
+                "floatingFilter": True,
+                "wrapText": False,
+            },
+            dashGridOptions={"rowSelection": "single", "animateRows": True, "pagination": True, "paginationPageSize": 10},
+            className="ag-theme-quartz",
+            style={"height": "360px", "width": "100%"},
         ),
 
         dcc.Store(id="t1-user-json", data={}),         # who is signed in (object)
-        dcc.Store(id="t1-rows-json", data=[]),         # rows backing the table
+        dcc.Store(id="t1-rows-json", data=[]),         # source rows
         dcc.Store(id="t1-selected-cid", data=None),    # current athlete id
     ], fluid=True)
 
@@ -315,31 +309,29 @@ def show_current_user(_n1, _n2, current_children):
     except Exception:
         return (current_children if current_children else sign_in_link), dash.no_update
 
-# ------------------------- Callbacks: Tab 1 — Athlete Summary & Notes -------------------------
+# ------------------------- Callbacks: Tab 1 — Athlete Summary & Notes (AG Grid) -------------------------
 @app.callback(
-    Output("t1-table-container", "children"),
+    Output("t1-grid-container", "children"),
     Output("t1-rows-json", "data"),
     Input("t1-load", "n_clicks"),
     State("t1-groups", "value"),
     prevent_initial_call=True
 )
-def t1_build_table(n, groups):
+def t1_build_grid(n, groups):
     if not groups:
         raise PreventUpdate
     targets = {g.strip().lower() for g in groups}
 
-    # Build athlete summary rows
     rows = []
     cids = [cid for cid, glist in CID_TO_GROUPS.items() if targets & set(glist)]
     for cid in cids:
         cust = CUSTOMERS.get(cid, {})
         label = label_for_cid(cid)
-        email = cust.get("email") or ""
-        phone = cust.get("phone") or cust.get("mobile") or ""
         groups_str = ", ".join(sorted({g.title() for g in CID_TO_GROUPS.get(cid, [])}))
+        status = current_training_status_for_cid(cid)  # may be ""
 
-        # Current training status (may be blank if no accessible encounter body here)
-        status = current_training_status_for_cid(cid)
+        # Pick pastel color for status pill (fallback light gray)
+        status_color = PASTEL_COLOR.get(status, "#e6e6e6")
 
         complaints = fetch_customer_complaints(cid)
         comp_count = len(complaints)
@@ -347,7 +339,6 @@ def t1_build_table(n, groups):
         if comp_count:
             try:
                 dfc = pd.DataFrame(complaints)
-                # sort by onset date if parseable
                 dfc["_on"] = pd.to_datetime(dfc["Onset"], errors="coerce")
                 dfc = dfc.sort_values(["_on"], na_position="last", ascending=False)
                 latest_title   = str(dfc.iloc[0]["Title"] or "")
@@ -357,12 +348,11 @@ def t1_build_table(n, groups):
                 pass
 
         rows.append({
+            "CID": cid,  # hidden field, used for selection
             "Athlete": label,
-            "Athlete ID": cid,
             "Groups": groups_str,
-            "Email": email,
-            "Phone": phone,
             "Current Status": status,
+            "StatusColor": status_color,  # used by renderer
             "Complaints": comp_count,
             "Latest Complaint": latest_title,
             "Latest Onset": latest_onset,
@@ -372,56 +362,119 @@ def t1_build_table(n, groups):
     if not rows:
         return html.Div("No athletes in those groups.", className="alert alert-warning"), []
 
-    df = pd.DataFrame(rows)
+    # Column definitions with pill renderers
+    col_defs = [
+        {"headerName": "Athlete", "field": "Athlete", "pinned": "left", "filter": True, "sortable": True,
+         "checkboxSelection": True, "headerCheckboxSelection": False},
+        {
+            "headerName": "Groups", "field": "Groups", "filter": True, "sortable": True, "autoHeight": True, "wrapText": True,
+            "cellRenderer": dag.JsCode("""
+                function(params) {
+                  if (!params.value) return '';
+                  const items = params.value.split(',').map(s => s.trim()).filter(Boolean);
+                  return items.map(g => `<span style="
+                      display:inline-block; margin:2px 4px 2px 0; padding:2px 8px;
+                      border-radius:999px; background:#f1f3f5; border:1px solid #e1e5ea;
+                      font-size:12px;">${g}</span>`).join(' ');
+                }
+            """)
+        },
+        {
+            "headerName": "Current Status", "field": "Current Status", "filter": True, "sortable": True,
+            "cellRenderer": dag.JsCode("""
+                function(params) {
+                  const text = params.value || '';
+                  const color = (params.data && params.data.StatusColor) ? params.data.StatusColor : '#e6e6e6';
+                  const dot = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;
+                                 background:${color};border:1px solid rgba(0,0,0,.18);margin-right:6px;"></span>`;
+                  const pill = `<span style="display:inline-block; padding:2px 8px; border-radius:999px;
+                                   background:${color}; border:1px solid rgba(0,0,0,.10); font-size:12px;">${text || '—'}</span>`;
+                  return dot + pill;
+                }
+            """)
+        },
+        {
+            "headerName": "Complaints", "field": "Complaints", "filter": "agNumberColumnFilter", "sortable": True,
+            "width": 130,
+            "cellRenderer": dag.JsCode("""
+                function(params) {
+                  const v = Number(params.value || 0);
+                  let bg = '#eef2ff'; // light indigo
+                  if (v >= 3) bg = '#ffe8cc'; // light orange
+                  else if (v === 0) bg = '#f1f3f5'; // light grey
+                  return `<span style="display:inline-block; padding:2px 8px; border-radius:999px;
+                           background:${bg}; border:1px solid #e1e5ea; font-weight:600;">${v}</span>`;
+                }
+            """)
+        },
+        {"headerName": "Latest Complaint", "field": "Latest Complaint", "filter": True, "sortable": True, "flex": 1},
+        {"headerName": "Latest Onset", "field": "Latest Onset", "filter": True, "sortable": True, "width": 140},
+        {"headerName": "Latest Priority", "field": "Latest Priority", "filter": True, "sortable": True, "width": 160},
+        {"headerName": "CID", "field": "CID", "hide": True},  # hidden technical column
+    ]
 
-    table = dash_table.DataTable(
-        id="t1-table",
-        data=df.to_dict("records"),
-        columns=[{"name": c, "id": c} for c in df.columns],
-        page_size=15,
-        filter_action="native",
-        sort_action="native",
-        row_selectable="single",
-        style_table={"overflowX":"auto"},
-        style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","borderBottom":"1px solid #e9ecef"},
-        style_cell={"padding":"9px","fontSize":14,
-                    "fontFamily":"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
-                    "textAlign":"left"},
-        style_data={"borderBottom":"1px solid #eceff4"},
-        style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#fbfbfd"}],
+    grid = dag.AgGrid(
+        id="t1-grid",
+        columnDefs=col_defs,
+        rowData=rows,
+        defaultColDef={
+            "resizable": True,
+            "filter": True,
+            "sortable": True,
+            "floatingFilter": True,
+            "wrapText": False,
+        },
+        dashGridOptions={
+            "rowSelection": "single",
+            "animateRows": True,
+            "pagination": True,
+            "paginationPageSize": 15,
+            "suppressRowClickSelection": False,
+            "ensureDomOrder": True,
+            "domLayout": "normal"
+        },
+        className="ag-theme-quartz",
+        style={"height": "520px", "width": "100%"},
     )
 
-    return table, df.to_dict("records")
+    return grid, rows
+
+@app.callback(
+    Output("t1-grid", "quickFilterText"),
+    Input("t1-quick-filter", "value"),
+    prevent_initial_call=True
+)
+def t1_quick_filter(val):
+    return val or ""
 
 @app.callback(
     Output("t1-athlete", "options"),
     Output("t1-athlete", "value"),
     Output("t1-complaint", "options"),
     Output("t1-complaint", "value"),
-    Output("t1-comments-table", "data"),
+    Output("t1-comments-grid", "rowData"),
     Output("t1-selected-cid", "data"),
-    Input("t1-table", "selected_rows"),
-    State("t1-rows-json", "data"),
+    Input("t1-grid", "selectedRows"),
     prevent_initial_call=True
 )
-def t1_pick_athlete(selected_rows, rows_json):
-    if not rows_json or selected_rows is None or not selected_rows:
+def t1_pick_athlete(selected_rows):
+    if not selected_rows:
         raise PreventUpdate
-    row = rows_json[selected_rows[0]]
-    cid = int(row["Athlete ID"])
-    label = row["Athlete"]
+    row = selected_rows[0]
+    cid = int(row.get("CID"))
+    label = row.get("Athlete")
 
-    # Athlete dropdown reflects the loaded cohort (optional, here just one)
+    # Athlete dropdown reflects the cohort (optional, here just one)
     opts = [{"label": label, "value": cid}]
-    complaints = fetch_customer_complaints(cid)
-    c_opts = [{"label": c["Title"] or "(untitled)", "value": c["Title"] or ""} for c in complaints]
-    c_opts = [o for o in c_opts if o["value"]]
 
+    complaints = fetch_customer_complaints(cid)
+    c_opts = [{"label": c["Title"] or "(untitled)", "value": c["Title"] or ""} for c in complaints if (c.get("Title") or "").strip()]
     comments = db2_list_for_athlete(cid)
+
     return opts, cid, c_opts, (c_opts[0]["value"] if c_opts else None), comments, cid
 
 @app.callback(
-    Output("t1-comments-table", "data", allow_duplicate=True),
+    Output("t1-comments-grid", "rowData", allow_duplicate=True),
     Output("t1-save-msg", "children"),
     State("t1-selected-cid", "data"),
     State("t1-athlete", "options"),
@@ -437,24 +490,20 @@ def t1_save_comment(cid, athlete_opts, complaint_value, comment_text, user_json,
     if not cid or not complaint_value or not (comment_text or "").strip():
         return dash.no_update, "Please choose an athlete, a complaint, and enter a comment."
 
-    # Today’s date
-    today = pd.Timestamp("today").strftime("%Y-%m-%d")
+    today = datetime.utcnow().strftime("%Y-%m-%d")
 
-    # Author info from /me
     name  = (user_json or {}).get("name") or (f"{(user_json or {}).get('first_name','')} {(user_json or {}).get('last_name','')}".strip())
     email = (user_json or {}).get("email") or ((user_json or {}).get("user") or {}).get("email")
 
-    # Athlete label from options
     athlete_label = ""
     if athlete_opts:
         for o in athlete_opts:
             if int(o["value"]) == int(cid):
-                athlete_label = o["label"]
-                break
+                athlete_label = o["label"]; break
     if not athlete_label:
         athlete_label = f"ID {cid}"
 
-    # Current complaint status
+    # Current complaint status from merged complaints
     status = ""
     try:
         comps = fetch_customer_complaints(int(cid))
@@ -465,10 +514,7 @@ def t1_save_comment(cid, athlete_opts, complaint_value, comment_text, user_json,
     except Exception:
         pass
 
-    # Save to DB
-    db2_add(today, name or "Unknown", email or "", int(cid), athlete_label, complaint_value, status, comment_text.strip())
-
-    # Refresh table
+    db2_add(today, name or "Unknown", email or "", int(cid), athlete_label, complaint_value, status, (comment_text or "").strip())
     data = db2_list_for_athlete(int(cid))
     return data, "Saved."
 
