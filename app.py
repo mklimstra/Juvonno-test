@@ -1,13 +1,14 @@
 import os
 import requests
-import json
 import sqlite3
 import dash
+import pandas as pd
+
 from dash_auth_external import DashAuthExternal
 from dash.exceptions import PreventUpdate
-from dash import Dash, Input, Output, html, dcc, no_update, State, callback_context
+from dash import Dash, Input, Output, html, dcc, no_update, State
 import dash_bootstrap_components as dbc
-import dash_ag_grid as dag  # NEW
+import dash_ag_grid as dag
 
 # PKCE + login helpers
 import base64, hashlib, secrets
@@ -18,24 +19,21 @@ from flask import session, redirect
 from layout import Footer, Navbar
 from settings import *  # AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLIENT_SECRET
 
-# Training dashboard (second tab)
+# Training dashboard (Tab 2)
 from training_dashboard import (
     layout_body as training_layout_body,
     register_callbacks as training_register_callbacks,
-    # reuse data/logic for first tab
     CUSTOMERS, CID_TO_GROUPS, CID_TO_APPTS,
-    fetch_customer_complaints, extract_training_status,
-    encounter_ids_for_appt, tidy_date_str, PASTEL_COLOR
+    fetch_customer_complaints, tidy_date_str, PASTEL_COLOR
 )
 
-import pandas as pd
 from datetime import datetime
 
 # ------------------------- Auth / Server -------------------------
 auth = DashAuthExternal(
     AUTH_URL,
     TOKEN_URL,
-    app_url=APP_URL,          # e.g., https://connect.posit.cloud/content/<id>
+    app_url=APP_URL,
     client_id=CLIENT_ID,
     client_secret=CLIENT_SECRET
 )
@@ -132,36 +130,12 @@ def db2_list_for_athlete(athlete_id: int):
     } for r in rows]
 
 # ------------------------- Helpers (Tab 1) -------------------------
-def current_training_status_for_cid(cid: int) -> str:
-    """Best-effort forward-fill latest status (kept minimal to avoid reaching into private internals)."""
-    appts = CID_TO_APPTS.get(cid, [])
-    rows = []
-    for ap in appts:
-        aid = ap.get("id")
-        dt = pd.to_datetime(tidy_date_str(ap.get("date")), errors="coerce")
-        if pd.isna(dt): 
-            continue
-        # NOTE: Without importing fetch_encounter here, we can’t derive status reliably → keep blank.
-        # Tab 2 remains the source of truth for detailed status.
-        # If you want exact parity, export fetch_encounter from training_dashboard and call it here.
-    if not rows:
-        return ""
-    df_s = pd.DataFrame(rows, columns=["Date", "Status"]).sort_values("Date")
-    df_s = df_s.drop_duplicates("Date", keep="last")
-    full_idx = pd.date_range(start=df_s["Date"].min(), end=pd.Timestamp("today").normalize(), freq="D")
-    df_full = pd.DataFrame({"Date": full_idx}).merge(df_s, on="Date", how="left").sort_values("Date")
-    df_full["Status"] = df_full["Status"].ffill()
-    try:
-        return str(df_full.iloc[-1]["Status"])
-    except Exception:
-        return ""
-
 def label_for_cid(cid: int) -> str:
     c = CUSTOMERS.get(cid, {})
     return f"{c.get('first_name','')} {c.get('last_name','')} (ID {cid})".strip()
 
-# Precompute group dropdown
-ALL_GROUPS = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
+# Groups dropdown options (normalized like in training_dashboard)
+ALL_GROUPS = sorted({g for lst in CID_TO_GROUPS.values() for g in (lst or [])})
 GROUP_OPTS = [{"label": g.title(), "value": g} for g in ALL_GROUPS]
 
 # ------------------------- Dash app -------------------------
@@ -231,7 +205,6 @@ def tab1_layout():
                 "filter": True,
                 "sortable": True,
                 "floatingFilter": True,
-                "wrapText": False,
             },
             dashGridOptions={"rowSelection": "single", "animateRows": True, "pagination": True, "paginationPageSize": 10},
             className="ag-theme-quartz",
@@ -239,7 +212,7 @@ def tab1_layout():
         ),
 
         dcc.Store(id="t1-user-json", data={}),         # who is signed in (object)
-        dcc.Store(id="t1-rows-json", data=[]),         # source rows
+        dcc.Store(id="t1-rows-json", data=[]),         # source rows backing the grid
         dcc.Store(id="t1-selected-cid", data=None),    # current athlete id
     ], fluid=True)
 
@@ -310,29 +283,38 @@ def show_current_user(_n1, _n2, current_children):
         return (current_children if current_children else sign_in_link), dash.no_update
 
 # ------------------------- Callbacks: Tab 1 — Athlete Summary & Notes (AG Grid) -------------------------
+
+# Rebuild the grid when clicking Load OR when group selection changes
 @app.callback(
     Output("t1-grid-container", "children"),
     Output("t1-rows-json", "data"),
     Input("t1-load", "n_clicks"),
-    State("t1-groups", "value"),
+    Input("t1-groups", "value"),
     prevent_initial_call=True
 )
-def t1_build_grid(n, groups):
+def t1_build_grid(_n_clicks, groups):
     if not groups:
-        raise PreventUpdate
-    targets = {g.strip().lower() for g in groups}
+        return html.Div("Select at least one patient group.", className="alert alert-info"), []
+
+    # Normalize groups to lower for matching, since CID_TO_GROUPS are normalized
+    if isinstance(groups, list):
+        targets = { (g or "").strip().lower() for g in groups }
+    else:
+        targets = { (groups or "").strip().lower() }
+
+    # Resolve matching athletes
+    cids = [cid for cid, glist in CID_TO_GROUPS.items() if targets & set(glist or [])]
+
+    if not cids:
+        return html.Div("No athletes found for the selected group(s).", className="alert alert-warning"), []
 
     rows = []
-    cids = [cid for cid, glist in CID_TO_GROUPS.items() if targets & set(glist)]
     for cid in cids:
         cust = CUSTOMERS.get(cid, {})
         label = label_for_cid(cid)
-        groups_str = ", ".join(sorted({g.title() for g in CID_TO_GROUPS.get(cid, [])}))
-        status = current_training_status_for_cid(cid)  # may be ""
+        groups_str = ", ".join(sorted({g.title() for g in (CID_TO_GROUPS.get(cid) or [])}))
 
-        # Pick pastel color for status pill (fallback light gray)
-        status_color = PASTEL_COLOR.get(status, "#e6e6e6")
-
+        # Complaints summary for styling and latest columns
         complaints = fetch_customer_complaints(cid)
         comp_count = len(complaints)
         latest_title, latest_onset, latest_priority = "", "", ""
@@ -341,28 +323,31 @@ def t1_build_grid(n, groups):
                 dfc = pd.DataFrame(complaints)
                 dfc["_on"] = pd.to_datetime(dfc["Onset"], errors="coerce")
                 dfc = dfc.sort_values(["_on"], na_position="last", ascending=False)
-                latest_title   = str(dfc.iloc[0]["Title"] or "")
-                latest_onset   = str(dfc.iloc[0]["Onset"] or "")
-                latest_priority= str(dfc.iloc[0]["Priority"] or "")
+                latest_title    = str(dfc.iloc[0]["Title"] or "")
+                latest_onset    = str(dfc.iloc[0]["Onset"] or "")
+                latest_priority = str(dfc.iloc[0]["Priority"] or "")
             except Exception:
                 pass
 
+        # Current Status (best-effort; Tab 2 is the detailed source of truth).
+        # To keep cross-file changes minimal, leave blank here if not available.
+        status = ""
+
+        status_color = PASTEL_COLOR.get(status, "#e6e6e6")
+
         rows.append({
-            "CID": cid,  # hidden field, used for selection
+            "CID": cid,  # hidden technical column for selection
             "Athlete": label,
             "Groups": groups_str,
             "Current Status": status,
-            "StatusColor": status_color,  # used by renderer
+            "StatusColor": status_color,
             "Complaints": comp_count,
             "Latest Complaint": latest_title,
             "Latest Onset": latest_onset,
             "Latest Priority": latest_priority,
         })
 
-    if not rows:
-        return html.Div("No athletes in those groups.", className="alert alert-warning"), []
-
-    # Column definitions with pill renderers
+    # Grid with pill renderers
     col_defs = [
         {"headerName": "Athlete", "field": "Athlete", "pinned": "left", "filter": True, "sortable": True,
          "checkboxSelection": True, "headerCheckboxSelection": False},
@@ -410,7 +395,7 @@ def t1_build_grid(n, groups):
         {"headerName": "Latest Complaint", "field": "Latest Complaint", "filter": True, "sortable": True, "flex": 1},
         {"headerName": "Latest Onset", "field": "Latest Onset", "filter": True, "sortable": True, "width": 140},
         {"headerName": "Latest Priority", "field": "Latest Priority", "filter": True, "sortable": True, "width": 160},
-        {"headerName": "CID", "field": "CID", "hide": True},  # hidden technical column
+        {"headerName": "CID", "field": "CID", "hide": True},  # hidden tech column
     ]
 
     grid = dag.AgGrid(
@@ -422,7 +407,6 @@ def t1_build_grid(n, groups):
             "filter": True,
             "sortable": True,
             "floatingFilter": True,
-            "wrapText": False,
         },
         dashGridOptions={
             "rowSelection": "single",
@@ -439,6 +423,7 @@ def t1_build_grid(n, groups):
 
     return grid, rows
 
+# Quick filter for AG Grid
 @app.callback(
     Output("t1-grid", "quickFilterText"),
     Input("t1-quick-filter", "value"),
@@ -447,6 +432,7 @@ def t1_build_grid(n, groups):
 def t1_quick_filter(val):
     return val or ""
 
+# Selecting an athlete from the grid populates the athlete dropdown, complaint options, and loads comments
 @app.callback(
     Output("t1-athlete", "options"),
     Output("t1-athlete", "value"),
@@ -464,15 +450,14 @@ def t1_pick_athlete(selected_rows):
     cid = int(row.get("CID"))
     label = row.get("Athlete")
 
-    # Athlete dropdown reflects the cohort (optional, here just one)
     opts = [{"label": label, "value": cid}]
-
     complaints = fetch_customer_complaints(cid)
     c_opts = [{"label": c["Title"] or "(untitled)", "value": c["Title"] or ""} for c in complaints if (c.get("Title") or "").strip()]
     comments = db2_list_for_athlete(cid)
 
     return opts, cid, c_opts, (c_opts[0]["value"] if c_opts else None), comments, cid
 
+# Save comment with today's date, current user, athlete, complaint, and current complaint status
 @app.callback(
     Output("t1-comments-grid", "rowData", allow_duplicate=True),
     Output("t1-save-msg", "children"),
@@ -503,7 +488,7 @@ def t1_save_comment(cid, athlete_opts, complaint_value, comment_text, user_json,
     if not athlete_label:
         athlete_label = f"ID {cid}"
 
-    # Current complaint status from merged complaints
+    # Current complaint status from merged complaint sources
     status = ""
     try:
         comps = fetch_customer_complaints(int(cid))
