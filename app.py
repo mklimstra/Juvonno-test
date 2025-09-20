@@ -456,11 +456,13 @@ def t1_build_grid(_n_clicks, groups, customers, cid_to_groups):
             "paginationPageSize": 15,
             "suppressRowClickSelection": False,
             "ensureDomOrder": True,
-            "domLayout": "normal"
+            "domLayout": "normal",
         },
         className="ag-theme-quartz",
         style={"height": "520px", "width": "100%"},
+        dangerously_allow_code=True,   # ← add this
     )
+
 
     return grid, rows
 
