@@ -16,16 +16,15 @@ import base64, hashlib, secrets
 from urllib.parse import urlencode
 from flask import session, redirect
 
-# Repo layout + settings (exactly like the registration viewer)
+# Repo layout + settings
 from layout import Footer, Navbar
 from settings import *  # AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLIENT_SECRET
 
-# --- Import the working training dashboard + its data sources (CRITICAL) ---
+# Tab 2 (existing code)
 from training_dashboard import (
     layout_body as training_layout_body,
     register_callbacks as training_register_callbacks,
-    # reuse the same globals / helpers used by Tab 2
-    CUSTOMERS, CID_TO_GROUPS, GROUP_OPTS,
+    # only used on Tab 2
     fetch_customer_complaints, PASTEL_COLOR
 )
 
@@ -41,7 +40,6 @@ auth = DashAuthExternal(
 )
 server = auth.server
 
-# Cookie/session settings (safe defaults; match Connect behaviour)
 is_https = APP_URL.lower().startswith("https://") if APP_URL else False
 server.secret_key = os.getenv("SECRET_KEY", "dev-change-me")
 server.config.update(
@@ -131,6 +129,53 @@ def db2_list_for_athlete(athlete_id: int):
         "Athlete": r[3], "Complaint": r[4], "Complaint Status": r[5], "Comment": r[6]
     } for r in rows]
 
+# ------------------------- Tab 1: Its own Juvonno client -------------------------
+T1_API_KEY = os.getenv("JUV_API_KEY")
+T1_BASE    = "https://csipacific.juvonno.com/api"
+T1_HEADERS = {"accept": "application/json"}
+
+def _require_api_key_t1():
+    if not T1_API_KEY:
+        raise RuntimeError("Missing JUV_API_KEY (Tab 1). Set it in environment variables.")
+
+def _get_t1(path: str, **params):
+    params.setdefault("api_key", T1_API_KEY)
+    r = requests.get(f"{T1_BASE}/{path.lstrip('/')}", params=params, headers=T1_HEADERS, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+def _norm(s: str) -> str:
+    return (s or "").strip().lower()
+
+def t1_fetch_customers_full() -> dict[int, dict]:
+    """Independent fetch for Tab 1 using /customers/list (include=groups) paging."""
+    _require_api_key_t1()
+    out, page = [], 1
+    while True:
+        js = _get_t1("customers/list", include="groups", page=page, count=100, status="ACTIVE")
+        rows = js.get("list", js)
+        if not rows:
+            break
+        out.extend(rows)
+        if len(rows) < 100:
+            break
+        page += 1
+    return {c["id"]: c for c in out if c.get("id")}
+
+def t1_groups_of(cust: dict) -> list[str]:
+    """Normalize group names for a customer (for Tab 1 only)."""
+    src = cust.get("groups") if "groups" in cust else cust.get("group")
+    names: list[str] = []
+    if isinstance(src, list):
+        for it in src:
+            if isinstance(it, str): names.append(_norm(it))
+            elif isinstance(it, dict) and it.get("name"): names.append(_norm(it["name"]))
+    elif isinstance(src, dict) and src.get("name"):
+        names.append(_norm(src["name"]))
+    elif isinstance(src, str):
+        names.append(_norm(src))
+    return names
+
 # ------------------------- Dash app -------------------------
 app = Dash(
     __name__,
@@ -143,7 +188,7 @@ app = Dash(
     title="CSI Apps — Athlete Tools",
 )
 
-# ------------------------- Tab 1 layout (uses same Juvonno data as Tab 2) -------------------------
+# ------------------------- Tab 1 layout -------------------------
 def tab1_layout():
     return dbc.Container([
         html.H3("Athlete Summary & Notes", className="mt-1"),
@@ -151,7 +196,7 @@ def tab1_layout():
         dbc.Row([
             dbc.Col(dcc.Dropdown(
                 id="t1-groups",
-                options=GROUP_OPTS,      # ← EXACTLY the same list built by training_dashboard.py
+                options=[],              # ← populated by API on load
                 multi=True,
                 placeholder="Select patient group(s)…"
             ), md=6),
@@ -211,9 +256,11 @@ def tab1_layout():
             style={"height": "360px", "width": "100%"},
         ),
 
-        # stores (kept for state; data now read from training_dashboard globals)
+        # stores state for Tab 1 only
         dcc.Store(id="t1-user-json", data={}),
-        dcc.Store(id="t1-rows-json", data=[]),
+        dcc.Store(id="t1-customers", data={}),     # full customers dict (by id)
+        dcc.Store(id="t1-cid-to-groups", data={}), # cid -> [group]
+        dcc.Store(id="t1-rows-json", data=[]),     # grid rows
         dcc.Store(id="t1-selected-cid", data=None),
     ], fluid=True)
 
@@ -235,7 +282,7 @@ app.layout = html.Div([
     Footer().render(),
 ])
 
-# ------------------------- Global: auth bootstrap + navbar user -------------------------
+# ------------------------- Auth bootstrap + navbar user -------------------------
 @app.callback(
     Output("redirect-to", "href"),
     Input("init-interval", "n_intervals")
@@ -283,27 +330,49 @@ def show_current_user(_n1, _n2, current_children):
     except Exception:
         return (current_children if current_children else sign_in_link), dash.no_update
 
-# ------------------------- Tab 1 callbacks (NOW using training_dashboard globals) -------------------------
+# ------------------------- Tab 1: fetch groups & customers (independent) -------------------------
+@app.callback(
+    Output("t1-groups", "options"),
+    Output("t1-customers", "data"),
+    Output("t1-cid-to-groups", "data"),
+    Input("tabs", "active_tab"),
+)
+def t1_bootstrap(active_tab):
+    """When Tab 1 becomes active (or on first load), fetch /customers/list and derive group options."""
+    if active_tab != "tab1":
+        raise PreventUpdate
 
-# Build grid when clicking Load or changing groups
+    try:
+        customers = t1_fetch_customers_full()  # {cid: {...}}
+    except Exception as e:
+        print("Tab1 customers fetch error:", e)
+        return [], {}, {}
+
+    cid_to_groups = {cid: t1_groups_of(c) for cid, c in customers.items()}
+    all_groups = sorted({g for lst in cid_to_groups.values() for g in (lst or [])})
+    group_opts = [{"label": g.title(), "value": g} for g in all_groups]
+
+    return group_opts, customers, cid_to_groups
+
+# Build grid when clicking Load or changing groups — Tab 1 calls its own cached data
 @app.callback(
     Output("t1-grid-container", "children"),
     Output("t1-rows-json", "data"),
     Input("t1-load", "n_clicks"),
-    Input("t1-groups", "value"),
+    State("t1-groups", "value"),
+    State("t1-customers", "data"),
+    State("t1-cid-to-groups", "data"),
     prevent_initial_call=True
 )
-def t1_build_grid(_n_clicks, groups):
+def t1_build_grid(_n_clicks, groups, customers, cid_to_groups):
     if not groups:
         return html.Div("Select at least one patient group.", className="alert alert-info"), []
 
-    # Normalize groups (match training_dashboard.py _norm)
-    def _norm(s): return (s or "").strip().lower()
-    targets = {_norm(g) for g in (groups if isinstance(groups, list) else [groups])}
+    def _norm_local(s): return (s or "").strip().lower()
+    targets = {_norm_local(g) for g in (groups if isinstance(groups, list) else [groups])}
 
-    # Filter using the SAME map the training tab uses
     matching_cids = [
-        cid for cid, glist in CID_TO_GROUPS.items()
+        int(cid) for cid, glist in (cid_to_groups or {}).items()
         if targets & set(glist or [])
     ]
 
@@ -312,42 +381,27 @@ def t1_build_grid(_n_clicks, groups):
 
     rows = []
     for cid in matching_cids:
-        cust = CUSTOMERS.get(cid, {})
+        cust = (customers or {}).get(str(cid)) or (customers or {}).get(cid) or {}
         label = f"{cust.get('first_name','')} {cust.get('last_name','')} (ID {cid})".strip()
-        groups_str = ", ".join(sorted({(g or "").title() for g in (CID_TO_GROUPS.get(cid) or [])}))
+        groups_str = ", ".join(sorted({(g or "").title() for g in ((cid_to_groups or {}).get(str(cid)) or (cid_to_groups or {}).get(cid) or [])}))
 
-        # Complaints summary (reuse same function)
-        complaints = fetch_customer_complaints(cid)
-        comp_count = len(complaints)
-        latest_title, latest_onset, latest_priority = "", "", ""
-        if comp_count:
-            try:
-                dfc = pd.DataFrame(complaints)
-                dfc["_on"] = pd.to_datetime(dfc["Onset"], errors="coerce")
-                dfc = dfc.sort_values(["_on"], na_position="last", ascending=False)
-                latest_title    = str(dfc.iloc[0]["Title"] or "")
-                latest_onset    = str(dfc.iloc[0]["Onset"] or "")
-                latest_priority = str(dfc.iloc[0]["Priority"] or "")
-            except Exception:
-                pass
-
-        # Current Status not recomputed here; pill will still show (—) with neutral color
+        # Tab 1 keeps status blank (we're not recomputing here)
         status = ""
         status_color = PASTEL_COLOR.get(status, "#e6e6e6")
 
         rows.append({
-            "CID": cid,  # hidden technical column for selection
+            "CID": cid,
             "Athlete": label,
             "Groups": groups_str,
             "Current Status": status,
             "StatusColor": status_color,
-            "Complaints": comp_count,
-            "Latest Complaint": latest_title,
-            "Latest Onset": latest_onset,
-            "Latest Priority": latest_priority,
+            "Complaints": "—",
+            "Latest Complaint": "—",
+            "Latest Onset": "—",
+            "Latest Priority": "—",
         })
 
-    # AG Grid with some pills
+    # AG Grid with pills
     col_defs = [
         {"headerName": "Athlete", "field": "Athlete", "pinned": "left", "filter": True, "sortable": True,
          "checkboxSelection": True, "headerCheckboxSelection": False},
@@ -378,24 +432,11 @@ def t1_build_grid(_n_clicks, groups):
                 }
             """)
         },
-        {
-            "headerName": "Complaints", "field": "Complaints", "filter": "agNumberColumnFilter", "sortable": True,
-            "width": 130,
-            "cellRenderer": dag.JsCode("""
-                function(params) {
-                  const v = Number(params.value || 0);
-                  let bg = '#eef2ff'; // light indigo
-                  if (v >= 3) bg = '#ffe8cc'; // light orange
-                  else if (v === 0) bg = '#f1f3f5'; // light grey
-                  return `<span style="display:inline-block; padding:2px 8px; border-radius:999px;
-                           background:${bg}; border:1px solid #e1e5ea; font-weight:600;">${v}</span>`;
-                }
-            """)
-        },
+        {"headerName": "Complaints", "field": "Complaints", "filter": True, "sortable": True, "width": 130},
         {"headerName": "Latest Complaint", "field": "Latest Complaint", "filter": True, "sortable": True, "flex": 1},
         {"headerName": "Latest Onset", "field": "Latest Onset", "filter": True, "sortable": True, "width": 140},
         {"headerName": "Latest Priority", "field": "Latest Priority", "filter": True, "sortable": True, "width": 160},
-        {"headerName": "CID", "field": "CID", "hide": True},  # hidden tech column
+        {"headerName": "CID", "field": "CID", "hide": True},
     ]
 
     grid = dag.AgGrid(
@@ -432,7 +473,7 @@ def t1_build_grid(_n_clicks, groups):
 def t1_quick_filter(val):
     return val or ""
 
-# Selecting an athlete from the grid populates athlete dropdown, complaint options, and loads comments
+# When selecting a row, populate athlete dropdown and load complaints (Tab 1 independent complaints fetch)
 @app.callback(
     Output("t1-athlete", "options"),
     Output("t1-athlete", "value"),
@@ -440,24 +481,28 @@ def t1_quick_filter(val):
     Output("t1-complaint", "value"),
     Output("t1-comments-grid", "rowData"),
     Output("t1-selected-cid", "data"),
+    State("t1-customers", "data"),
     Input("t1-grid", "selectedRows"),
     prevent_initial_call=True
 )
-def t1_pick_athlete(selected_rows):
+def t1_pick_athlete(customers, selected_rows):
     if not selected_rows:
         raise PreventUpdate
     row = selected_rows[0]
     cid = int(row.get("CID"))
-    label = row.get("Athlete")
+    cust = (customers or {}).get(str(cid)) or (customers or {}).get(cid) or {}
+    label = f"{cust.get('first_name','')} {cust.get('last_name','')} (ID {cid})".strip()
 
-    opts = [{"label": label, "value": cid}]
+    # Fetch complaints independently for Tab 1, using the same helper from training_dashboard (safe to import)
     complaints = fetch_customer_complaints(cid)
-    c_opts = [{"label": c["Title"] or "(untitled)", "value": c["Title"] or ""} for c in complaints if (c.get("Title") or "").strip()]
+    c_opts = [{"label": (c["Title"] or "(untitled)"), "value": (c["Title"] or "")}
+              for c in complaints if (c.get("Title") or "").strip()]
+
     comments = db2_list_for_athlete(cid)
 
-    return opts, cid, c_opts, (c_opts[0]["value"] if c_opts else None), comments, cid
+    return [{"label": label, "value": cid}], cid, c_opts, (c_opts[0]["value"] if c_opts else None), comments, cid
 
-# Save comment with today's date, current user, athlete, complaint, and current complaint status
+# Save comment (Tab 1)
 @app.callback(
     Output("t1-comments-grid", "rowData", allow_duplicate=True),
     Output("t1-save-msg", "children"),
@@ -488,7 +533,7 @@ def t1_save_comment(cid, athlete_opts, complaint_value, comment_text, user_json,
     if not athlete_label:
         athlete_label = f"ID {cid}"
 
-    # Current complaint status from merged complaint sources
+    # Pull complaint status (using training_dashboard helper again)
     status = ""
     try:
         comps = fetch_customer_complaints(int(cid))
