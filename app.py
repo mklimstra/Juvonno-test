@@ -23,7 +23,7 @@ from settings import *  # AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLI
 from training_dashboard import (
     layout_body as training_layout_body,
     register_callbacks as training_register_callbacks,
-    CUSTOMERS, CID_TO_GROUPS, CID_TO_APPTS,
+    # we still re-use complaints/status helpers for Tab 1 comments, but not customers
     fetch_customer_complaints, tidy_date_str, PASTEL_COLOR
 )
 
@@ -129,14 +129,58 @@ def db2_list_for_athlete(athlete_id: int):
         "Athlete": r[3], "Complaint": r[4], "Complaint Status": r[5], "Comment": r[6]
     } for r in rows]
 
-# ------------------------- Helpers (Tab 1) -------------------------
-def label_for_cid(cid: int) -> str:
-    c = CUSTOMERS.get(cid, {})
-    return f"{c.get('first_name','')} {c.get('last_name','')} (ID {cid})".strip()
+# ------------------------- Tab 1 Juvonno customer fetch (NEW, direct API) -------------------------
+JUV_API_KEY = os.getenv("JUV_API_KEY")  # MUST be set in Posit Connect
+JUV_BASE = "https://csipacific.juvonno.com/api"
+JUV_HEADERS = {"accept": "application/json"}
 
-# Groups dropdown options (normalized like in training_dashboard)
-ALL_GROUPS = sorted({g for lst in CID_TO_GROUPS.values() for g in (lst or [])})
-GROUP_OPTS = [{"label": g.title(), "value": g} for g in ALL_GROUPS]
+def _juv_get(path: str, **params):
+    """Direct GET to Juvonno, always passing api_key from env."""
+    if not JUV_API_KEY:
+        raise RuntimeError("JUV_API_KEY is not set in the environment.")
+    params = dict(params or {})
+    params.setdefault("api_key", JUV_API_KEY)
+    url = f"{JUV_BASE}/{path.lstrip('/')}"
+    r = requests.get(url, params=params, headers=JUV_HEADERS, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+def t1_fetch_customers_and_groups():
+    """
+    Fetch all ACTIVE customers with groups using /customers/list, paging 100 at a time.
+    Returns: (customers_by_id: dict, cid_to_groups: dict of lowercase group names)
+    """
+    out = []
+    page = 1
+    while True:
+        js = _juv_get("customers/list", include="groups", page=page, count=100, status="ACTIVE")
+        rows = js.get("list", js)
+        if not rows:
+            break
+        out.extend(rows)
+        if len(rows) < 100:
+            break
+        page += 1
+
+    customers = {c["id"]: c for c in out if isinstance(c, dict) and c.get("id")}
+    def _norm(s): return (s or "").strip().lower()
+    def groups_of(cust):
+        src = cust.get("groups") if "groups" in cust else cust.get("group")
+        names = []
+        if isinstance(src, list):
+            for it in src:
+                if isinstance(it, str):
+                    names.append(_norm(it))
+                elif isinstance(it, dict) and it.get("name"):
+                    names.append(_norm(it["name"]))
+        elif isinstance(src, dict) and src.get("name"):
+            names.append(_norm(src["name"]))
+        elif isinstance(src, str):
+            names.append(_norm(src))
+        return names
+
+    cid_to_groups = {cid: groups_of(c) for cid, c in customers.items()}
+    return customers, cid_to_groups
 
 # ------------------------- Dash app -------------------------
 app = Dash(
@@ -157,7 +201,7 @@ def tab1_layout():
         html.H3("Athlete Summary & Notes", className="mt-1"),
 
         dbc.Row([
-            dbc.Col(dcc.Dropdown(id="t1-groups", options=GROUP_OPTS, multi=True,
+            dbc.Col(dcc.Dropdown(id="t1-groups", options=[], multi=True,   # options filled at runtime now
                                  placeholder="Select patient group(s)…"), md=6),
             dbc.Col(dbc.Button("Load", id="t1-load", color="primary", className="w-100"), md=2),
             dbc.Col(dcc.Input(id="t1-quick-filter", placeholder="Search table…", type="text",
@@ -211,9 +255,12 @@ def tab1_layout():
             style={"height": "360px", "width": "100%"},
         ),
 
+        # stores for Tab 1
         dcc.Store(id="t1-user-json", data={}),         # who is signed in (object)
         dcc.Store(id="t1-rows-json", data=[]),         # source rows backing the grid
         dcc.Store(id="t1-selected-cid", data=None),    # current athlete id
+        dcc.Store(id="t1-customers-json", data={}),    # fresh customers from Juvonno
+        dcc.Store(id="t1-groups-map", data={}),        # cid -> groups (lowercase)
     ], fluid=True)
 
 app.layout = html.Div([
@@ -282,6 +329,28 @@ def show_current_user(_n1, _n2, current_children):
     except Exception:
         return (current_children if current_children else sign_in_link), dash.no_update
 
+# ------------------------- Tab 1 bootstrap: fetch groups & customers once user opens the tab -------------------------
+@app.callback(
+    Output("t1-groups", "options"),
+    Output("t1-customers-json", "data"),
+    Output("t1-groups-map", "data"),
+    Input("tabs", "active_tab"),
+    prevent_initial_call=False
+)
+def t1_init(active_tab):
+    if active_tab != "tab1":
+        raise PreventUpdate
+    # fetch customers & groups fresh
+    try:
+        customers, cid_to_groups = t1_fetch_customers_and_groups()
+    except Exception as e:
+        # show a disabled dropdown with the error info in placeholder
+        return [], {}, {}
+    # build group options from fresh data
+    all_groups = sorted({g for lst in cid_to_groups.values() for g in (lst or [])})
+    group_opts = [{"label": g.title(), "value": g} for g in all_groups]
+    return group_opts, customers, cid_to_groups
+
 # ------------------------- Callbacks: Tab 1 — Athlete Summary & Notes (AG Grid) -------------------------
 
 # Rebuild the grid when clicking Load OR when group selection changes
@@ -290,29 +359,32 @@ def show_current_user(_n1, _n2, current_children):
     Output("t1-rows-json", "data"),
     Input("t1-load", "n_clicks"),
     Input("t1-groups", "value"),
+    State("t1-customers-json", "data"),
+    State("t1-groups-map", "data"),
     prevent_initial_call=True
 )
-def t1_build_grid(_n_clicks, groups):
+def t1_build_grid(_n_clicks, groups, customers_json, cid_to_groups_json):
+    # sanity: must have fresh customers/groups from API
+    if not customers_json or not cid_to_groups_json:
+        return html.Div("Unable to fetch athletes. Check JUV_API_KEY and network.", className="alert alert-danger"), []
+
     if not groups:
         return html.Div("Select at least one patient group.", className="alert alert-info"), []
 
-    # Normalize groups to lower for matching, since CID_TO_GROUPS are normalized
-    if isinstance(groups, list):
-        targets = { (g or "").strip().lower() for g in groups }
-    else:
-        targets = { (groups or "").strip().lower() }
+    # Normalize groups for matching
+    targets = { (g or "").strip().lower() for g in (groups if isinstance(groups, list) else [groups]) }
 
-    # Resolve matching athletes
-    cids = [cid for cid, glist in CID_TO_GROUPS.items() if targets & set(glist or [])]
+    # Resolve matching athletes using the *fresh* cid→groups mapping
+    cids = [int(cid) for cid, glist in cid_to_groups_json.items() if targets & set(glist or [])]
 
     if not cids:
         return html.Div("No athletes found for the selected group(s).", className="alert alert-warning"), []
 
     rows = []
     for cid in cids:
-        cust = CUSTOMERS.get(cid, {})
-        label = label_for_cid(cid)
-        groups_str = ", ".join(sorted({g.title() for g in (CID_TO_GROUPS.get(cid) or [])}))
+        cust = customers_json.get(str(cid)) or customers_json.get(int(cid)) or {}
+        label = f"{cust.get('first_name','')} {cust.get('last_name','')} (ID {cid})".strip()
+        groups_str = ", ".join(sorted({(g or "").title() for g in (cid_to_groups_json.get(str(cid)) or cid_to_groups_json.get(cid) or [])}))
 
         # Complaints summary for styling and latest columns
         complaints = fetch_customer_complaints(cid)
@@ -329,10 +401,8 @@ def t1_build_grid(_n_clicks, groups):
             except Exception:
                 pass
 
-        # Current Status (best-effort; Tab 2 is the detailed source of truth).
-        # To keep cross-file changes minimal, leave blank here if not available.
+        # Current Status: leave blank here (Tab 2 shows authoritative status)
         status = ""
-
         status_color = PASTEL_COLOR.get(status, "#e6e6e6")
 
         rows.append({
@@ -493,7 +563,7 @@ def t1_save_comment(cid, athlete_opts, complaint_value, comment_text, user_json,
     try:
         comps = fetch_customer_complaints(int(cid))
         for c in comps:
-            if (c.get("Title") or "").strip().lower() == complaint_value.strip().lower():
+            if (c.get("Title") or "").strip().lower() == (complaint_value or "").strip().lower():
                 status = c.get("Status") or ""
                 break
     except Exception:
