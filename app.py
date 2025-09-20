@@ -1,36 +1,34 @@
 # app.py
 import os
+import json
+import math
 import requests
-import sqlite3
-import dash
 import pandas as pd
+from datetime import date, datetime
 
-from dash_auth_external import DashAuthExternal
-from dash.exceptions import PreventUpdate
-from dash import Dash, Input, Output, html, dcc, no_update, State
+import dash
 import dash_bootstrap_components as dbc
 import dash_ag_grid as dag
 
-# PKCE + login helpers
-import base64, hashlib, secrets
-from urllib.parse import urlencode
-from flask import session, redirect
+from dash import Dash, Input, Output, State, html, dcc, no_update
+from dash.exceptions import PreventUpdate
 
-# Repo layout + settings
-from layout import Footer, Navbar
+# Auth + layout modules (same as the repo)
+from dash_auth_external import DashAuthExternal
+from layout import Footer, Navbar, Pagination, GeographyFilters
 from settings import *  # AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLIENT_SECRET
 
-# Tab 2 (existing code)
+# Reuse all the data plumbing from your working dashboard
+# (we deliberately import functions & constants so Tab 1 fetches the same way)
 from training_dashboard import (
-    layout_body as training_layout_body,
-    register_callbacks as training_register_callbacks,
-    # only used on Tab 2
-    fetch_customer_complaints, PASTEL_COLOR
+    _require_api_key, _get, tidy_date_str,
+    fetch_customers_full, fetch_customer_complaints,
+    extract_training_status, encounter_ids_for_appt, fetch_encounter,
+    PASTEL_COLOR, STATUS_ORDER, GROUP_OPTS, _norm
 )
 
-from datetime import datetime
-
-# ------------------------- Auth / Server -------------------------
+# ──────────────────────────────────────────────────────────────────────
+# Auth / Flask server (unchanged from your working version)
 auth = DashAuthExternal(
     AUTH_URL,
     TOKEN_URL,
@@ -39,404 +37,110 @@ auth = DashAuthExternal(
     client_secret=CLIENT_SECRET
 )
 server = auth.server
-
-is_https = APP_URL.lower().startswith("https://") if APP_URL else False
 server.secret_key = os.getenv("SECRET_KEY", "dev-change-me")
-server.config.update(
-    SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=is_https
-)
 
-# Serve /assets like the repo
 here = os.path.dirname(os.path.abspath(__file__))
 assets_path = os.path.join(here, "assets")
 server.static_folder = assets_path
 server.static_url_path = "/assets"
 
-# ------------------------- PKCE login route -------------------------
-def _b64url(b: bytes) -> str:
-    return base64.urlsafe_b64encode(b).rstrip(b"=").decode("ascii")
+# ──────────────────────────────────────────────────────────────────────
+# Helpers (Tab 1)
+def _json_safe(obj):
+    """Coerce numpy, Timestamp, dates, and sets so dcc.Store can serialize clean JSON."""
+    import numpy as np
+    if isinstance(obj, (np.integer, )):
+        return int(obj)
+    if isinstance(obj, (np.floating,  )):
+        return float(obj)
+    if isinstance(obj, (np.bool_,     )):
+        return bool(obj)
+    if isinstance(obj, (pd.Timestamp, datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, set):
+        return list(obj)
+    return str(obj) if obj is not None else ""
 
-@server.route("/login", methods=["GET"])
-def login():
-    app_base = APP_URL.rstrip("/") if APP_URL else ""
-    redirect_uri = f"{app_base}/redirect"   # DashAuthExternal default callback path
+def _status_dot_html(text: str) -> str:
+    color = PASTEL_COLOR.get(text, "#e6e6e6")
+    return (
+        f'<span style="display:inline-block;width:10px;height:10px;border-radius:50%;'
+        f'background:{color};border:1px solid rgba(0,0,0,.25);margin-right:6px"></span>'
+        f'{text}'
+    )
 
-    verifier  = _b64url(secrets.token_bytes(32))
-    challenge = _b64url(hashlib.sha256(verifier.encode("ascii")).digest())
-    state     = _b64url(secrets.token_bytes(16))
+def _pill_html(txt: str, bg: str = "#f1f3f5", color: str = "#111"):
+    return (f'<span style="display:inline-block;padding:3px 8px;border-radius:9999px;'
+            f'font-size:12px;background:{bg};color:{color};border:1px solid #e3e6eb;'
+            f'margin:2px 4px 2px 0">{txt}</span>')
 
-    session["cv"] = verifier
-    session["st"] = state
-    session["redirect_uri"] = redirect_uri
+def _fmt_date(val) -> str:
+    try:
+        return pd.to_datetime(val).strftime("%Y-%m-%d")
+    except Exception:
+        return str(val) if val else ""
 
-    params = {
-        "response_type": "code",
-        "client_id": CLIENT_ID,
-        "redirect_uri": redirect_uri,
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-        "state": state,
+def _current_training_status_for_customer(aid_list):
+    """Forward-fill latest training status from this customer's appointments."""
+    status_rows = []
+    for ap in aid_list:
+        aid = ap.get("id")
+        dt  = pd.to_datetime(tidy_date_str(ap.get("date")), errors="coerce")
+        if pd.isna(dt):
+            continue
+        eids = encounter_ids_for_appt(aid)
+        max_eid = max(eids) if eids else None
+        s = extract_training_status(fetch_encounter(max_eid)) if max_eid else ""
+        if s:
+            status_rows.append((dt.normalize(), s))
+    if not status_rows:
+        return ""
+    df_s = pd.DataFrame(status_rows, columns=["Date", "Status"]).sort_values("Date")
+    df_s = df_s.drop_duplicates("Date", keep="last")
+    full_idx = pd.date_range(start=df_s["Date"].min(), end=pd.Timestamp("today").normalize(), freq="D")
+    df_full = pd.DataFrame({"Date": full_idx}).merge(df_s, on="Date", how="left").sort_values("Date")
+    df_full["Status"] = df_full["Status"].ffill()
+    return str(df_full.iloc[-1]["Status"]) if not df_full.empty else ""
+
+def _last_appt_date(aid_list):
+    dates = []
+    for ap in aid_list:
+        ds = tidy_date_str(ap.get("date"))
+        try:
+            dates.append(pd.to_datetime(ds))
+        except Exception:
+            pass
+    return _fmt_date(max(dates)) if dates else ""
+
+def t1_build_grid(rows):
+    """
+    AG Grid with pill renderers.
+    """
+    # JS renderers (allow_code=True below)
+    pill_renderer = dag.JsCode("""
+    function(params) {
+        if (!params.value) return "";
+        const items = Array.isArray(params.value) ? params.value : String(params.value).split(";").map(s=>s.trim()).filter(Boolean);
+        return items.map(txt => {
+            return `<span class="ag-theme-quartz" style="display:inline-block;padding:3px 8px;border-radius:9999px;font-size:12px;background:#f1f3f5;color:#111;border:1px solid #e3e6eb;margin:2px 4px 2px 0">${txt}</span>`;
+        }).join(" ");
     }
-    return redirect(f"{AUTH_URL}?{urlencode(params)}")
-
-# ------------------------- Minimal local DB for Tab 1 comments -------------------------
-DB_PATH = os.path.join(os.path.dirname(__file__), "comments.db")
-
-def _db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS comments2 (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            comment_date TEXT,
-            author_name TEXT,
-            author_email TEXT,
-            athlete_id INTEGER,
-            athlete_label TEXT,
-            complaint TEXT,
-            complaint_status TEXT,
-            comment TEXT,
-            created_at TEXT
-        )
     """)
-    conn.commit()
-    return conn
+    status_renderer = dag.JsCode("""
+    function(params){
+        if (!params.value) return "";
+        // value is already HTML string with a dot + text
+        return params.value;
+    }
+    """)
 
-def db2_add(comment_date, author_name, author_email, athlete_id, athlete_label, complaint, complaint_status, comment):
-    conn = _db()
-    conn.execute("""
-        INSERT INTO comments2(comment_date, author_name, author_email, athlete_id, athlete_label,
-                              complaint, complaint_status, comment, created_at)
-        VALUES (?,?,?,?,?,?,?,?,datetime('now'))
-    """, (comment_date, author_name, author_email, int(athlete_id) if athlete_id is not None else None,
-          athlete_label or "", complaint or "", complaint_status or "", comment or ""))
-    conn.commit()
-    conn.close()
-
-def db2_list_for_athlete(athlete_id: int):
-    conn = _db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT comment_date, author_name, author_email, athlete_label, complaint, complaint_status, comment
-        FROM comments2
-        WHERE athlete_id = ?
-        ORDER BY comment_date DESC, id DESC
-    """, (int(athlete_id),))
-    rows = cur.fetchall()
-    conn.close()
-    return [{
-        "Date": r[0], "Author": f"{r[1]} ({r[2]})" if r[2] else r[1],
-        "Athlete": r[3], "Complaint": r[4], "Complaint Status": r[5], "Comment": r[6]
-    } for r in rows]
-
-# ------------------------- Tab 1: Its own Juvonno client -------------------------
-T1_API_KEY = os.getenv("JUV_API_KEY")
-T1_BASE    = "https://csipacific.juvonno.com/api"
-T1_HEADERS = {"accept": "application/json"}
-
-def _require_api_key_t1():
-    if not T1_API_KEY:
-        raise RuntimeError("Missing JUV_API_KEY (Tab 1). Set it in environment variables.")
-
-def _get_t1(path: str, **params):
-    params.setdefault("api_key", T1_API_KEY)
-    r = requests.get(f"{T1_BASE}/{path.lstrip('/')}", params=params, headers=T1_HEADERS, timeout=20)
-    r.raise_for_status()
-    return r.json()
-
-def _norm(s: str) -> str:
-    return (s or "").strip().lower()
-
-def t1_fetch_customers_full() -> dict[int, dict]:
-    """Independent fetch for Tab 1 using /customers/list (include=groups) paging."""
-    _require_api_key_t1()
-    out, page = [], 1
-    while True:
-        js = _get_t1("customers/list", include="groups", page=page, count=100, status="ACTIVE")
-        rows = js.get("list", js)
-        if not rows:
-            break
-        out.extend(rows)
-        if len(rows) < 100:
-            break
-        page += 1
-    return {c["id"]: c for c in out if c.get("id")}
-
-def t1_groups_of(cust: dict) -> list[str]:
-    """Normalize group names for a customer (for Tab 1 only)."""
-    src = cust.get("groups") if "groups" in cust else cust.get("group")
-    names: list[str] = []
-    if isinstance(src, list):
-        for it in src:
-            if isinstance(it, str): names.append(_norm(it))
-            elif isinstance(it, dict) and it.get("name"): names.append(_norm(it["name"]))
-    elif isinstance(src, dict) and src.get("name"):
-        names.append(_norm(src["name"]))
-    elif isinstance(src, str):
-        names.append(_norm(src))
-    return names
-
-# ------------------------- Dash app -------------------------
-app = Dash(
-    __name__,
-    server=server,
-    external_stylesheets=[
-        dbc.themes.BOOTSTRAP,
-        "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css",
-    ],
-    suppress_callback_exceptions=True,
-    title="CSI Apps — Athlete Tools",
-)
-
-# ------------------------- Tab 1 layout -------------------------
-def tab1_layout():
-    return dbc.Container([
-        html.H3("Athlete Summary & Notes", className="mt-1"),
-
-        dbc.Row([
-            dbc.Col(dcc.Dropdown(
-                id="t1-groups",
-                options=[],              # ← populated by API on load
-                multi=True,
-                placeholder="Select patient group(s)…"
-            ), md=6),
-            dbc.Col(dbc.Button("Load", id="t1-load", color="primary", className="w-100"), md=2),
-            dbc.Col(dcc.Input(
-                id="t1-quick-filter",
-                placeholder="Search table…",
-                type="text",
-                className="form-control"
-            ), md=4),
-        ], className="g-2"),
-
-        html.Div(id="t1-grid-container", className="mt-3"),
-
-        dbc.Row([
-            dbc.Col([
-                html.Label("Selected Athlete"),
-                dcc.Dropdown(id="t1-athlete", options=[], value=None, placeholder="Choose an athlete…")
-            ], md=4),
-            dbc.Col([
-                html.Label("Complaint"),
-                dcc.Dropdown(id="t1-complaint", options=[], value=None, placeholder="Pick a complaint…")
-            ], md=4),
-            dbc.Col([
-                html.Label("Comment"),
-                dcc.Textarea(id="t1-comment", style={"width":"100%","height":"84px"},
-                             placeholder="Add a note about this athlete/complaint…")
-            ], md=4),
-        ], className="g-2 mt-3"),
-
-        dbc.Row([
-            dbc.Col(dbc.Button("Save Comment", id="t1-save", color="success"), width="auto"),
-            dbc.Col(html.Div(id="t1-save-msg", className="text-muted ms-2"), width="auto"),
-        ], className="mt-2"),
-
-        html.Hr(),
-        html.H5("Comment History"),
-        dag.AgGrid(
-            id="t1-comments-grid",
-            columnDefs=[
-                {"headerName": "Date", "field": "Date", "filter": True, "sortable": True},
-                {"headerName": "Author", "field": "Author", "filter": True, "sortable": True},
-                {"headerName": "Athlete", "field": "Athlete", "filter": True, "sortable": True},
-                {"headerName": "Complaint", "field": "Complaint", "filter": True, "sortable": True},
-                {"headerName": "Complaint Status", "field": "Complaint Status", "filter": True, "sortable": True},
-                {"headerName": "Comment", "field": "Comment", "filter": True, "wrapText": True, "autoHeight": True},
-            ],
-            rowData=[],
-            defaultColDef={
-                "resizable": True,
-                "filter": True,
-                "sortable": True,
-                "floatingFilter": True,
-            },
-            dashGridOptions={"rowSelection": "single", "animateRows": True, "pagination": True, "paginationPageSize": 10},
-            className="ag-theme-quartz",
-            style={"height": "360px", "width": "100%"},
-        ),
-
-        # stores state for Tab 1 only
-        dcc.Store(id="t1-user-json", data={}),
-        dcc.Store(id="t1-customers", data={}),     # full customers dict (by id)
-        dcc.Store(id="t1-cid-to-groups", data={}), # cid -> [group]
-        dcc.Store(id="t1-rows-json", data=[]),     # grid rows
-        dcc.Store(id="t1-selected-cid", data=None),
-    ], fluid=True)
-
-# ------------------------- App layout -------------------------
-app.layout = html.Div([
-    dcc.Location(id="redirect-to", refresh=True),
-    dcc.Interval(id="init-interval", interval=500, n_intervals=0, max_intervals=1),
-    dcc.Interval(id="user-refresh", interval=60_000, n_intervals=0),
-
-    Navbar([html.Span(id="navbar-user", className="text-white-50 small", children="")]).render(),
-
-    dbc.Container([
-        dbc.Tabs([
-            dbc.Tab(tab1_layout(), label="Athlete Summary & Notes", tab_id="tab1"),
-            dbc.Tab(training_layout_body(), label="Training Status", tab_id="tab2"),
-        ], id="tabs", active_tab="tab1", persistence=True, persistence_type="session")
-    ], fluid=True),
-
-    Footer().render(),
-])
-
-# ------------------------- Auth bootstrap + navbar user -------------------------
-@app.callback(
-    Output("redirect-to", "href"),
-    Input("init-interval", "n_intervals")
-)
-def initial_view(n):
-    try:
-        token = auth.get_token()
-    except Exception:
-        token = None
-    if not token:
-        return "login"
-    return no_update
-
-@app.callback(
-    Output("navbar-user", "children"),
-    Output("t1-user-json", "data"),
-    Input("init-interval", "n_intervals"),
-    Input("user-refresh", "n_intervals"),
-    State("navbar-user", "children"),
-    prevent_initial_call=False
-)
-def show_current_user(_n1, _n2, current_children):
-    try:
-        token = auth.get_token()
-    except Exception:
-        token = None
-
-    sign_in_link = html.A("Sign in", href="login", className="link-light text-decoration-none")
-
-    if not token:
-        return (current_children if current_children else sign_in_link), dash.no_update
-
-    try:
-        r = requests.get(f"{SITE_URL}/api/csiauth/me/", headers={"Authorization": f"Bearer {token}"}, timeout=6)
-        if r.status_code != 200:
-            return (current_children if current_children else html.A("Re-authenticate", href="login",
-                                                                     className="link-light text-decoration-none")), \
-                   dash.no_update
-        me = r.json() or {}
-        name  = (me.get("name") or me.get("display_name") or me.get("full_name") or
-                 f"{me.get('first_name','')} {me.get('last_name','')}".strip())
-        email = me.get("email") or (me.get("user") or {}).get("email")
-        label = f"Signed in as {name} ({email})" if (name and email) else f"Signed in as {name or email or 'user'}"
-        return label, me
-    except Exception:
-        return (current_children if current_children else sign_in_link), dash.no_update
-
-# ------------------------- Tab 1: fetch groups & customers (independent) -------------------------
-@app.callback(
-    Output("t1-groups", "options"),
-    Output("t1-customers", "data"),
-    Output("t1-cid-to-groups", "data"),
-    Input("tabs", "active_tab"),
-)
-def t1_bootstrap(active_tab):
-    """When Tab 1 becomes active (or on first load), fetch /customers/list and derive group options."""
-    if active_tab != "tab1":
-        raise PreventUpdate
-
-    try:
-        customers = t1_fetch_customers_full()  # {cid: {...}}
-    except Exception as e:
-        print("Tab1 customers fetch error:", e)
-        return [], {}, {}
-
-    cid_to_groups = {cid: t1_groups_of(c) for cid, c in customers.items()}
-    all_groups = sorted({g for lst in cid_to_groups.values() for g in (lst or [])})
-    group_opts = [{"label": g.title(), "value": g} for g in all_groups]
-
-    return group_opts, customers, cid_to_groups
-
-# Build grid when clicking Load or changing groups — Tab 1 calls its own cached data
-@app.callback(
-    Output("t1-grid-container", "children"),
-    Output("t1-rows-json", "data"),
-    Input("t1-load", "n_clicks"),
-    State("t1-groups", "value"),
-    State("t1-customers", "data"),
-    State("t1-cid-to-groups", "data"),
-    prevent_initial_call=True
-)
-def t1_build_grid(_n_clicks, groups, customers, cid_to_groups):
-    if not groups:
-        return html.Div("Select at least one patient group.", className="alert alert-info"), []
-
-    def _norm_local(s): return (s or "").strip().lower()
-    targets = {_norm_local(g) for g in (groups if isinstance(groups, list) else [groups])}
-
-    matching_cids = [
-        int(cid) for cid, glist in (cid_to_groups or {}).items()
-        if targets & set(glist or [])
-    ]
-
-    if not matching_cids:
-        return html.Div("No athletes found for the selected group(s).", className="alert alert-warning"), []
-
-    rows = []
-    for cid in matching_cids:
-        cust = (customers or {}).get(str(cid)) or (customers or {}).get(cid) or {}
-        label = f"{cust.get('first_name','')} {cust.get('last_name','')} (ID {cid})".strip()
-        groups_str = ", ".join(sorted({(g or "").title() for g in ((cid_to_groups or {}).get(str(cid)) or (cid_to_groups or {}).get(cid) or [])}))
-
-        # Tab 1 keeps status blank (we're not recomputing here)
-        status = ""
-        status_color = PASTEL_COLOR.get(status, "#e6e6e6")
-
-        rows.append({
-            "CID": cid,
-            "Athlete": label,
-            "Groups": groups_str,
-            "Current Status": status,
-            "StatusColor": status_color,
-            "Complaints": "—",
-            "Latest Complaint": "—",
-            "Latest Onset": "—",
-            "Latest Priority": "—",
-        })
-
-    # AG Grid with pills
     col_defs = [
-        {"headerName": "Athlete", "field": "Athlete", "pinned": "left", "filter": True, "sortable": True,
-         "checkboxSelection": True, "headerCheckboxSelection": False},
-        {
-            "headerName": "Groups", "field": "Groups", "filter": True, "sortable": True, "autoHeight": True, "wrapText": True,
-            "cellRenderer": dag.JsCode("""
-                function(params) {
-                  if (!params.value) return '';
-                  const items = params.value.split(',').map(s => s.trim()).filter(Boolean);
-                  return items.map(g => `<span style="
-                      display:inline-block; margin:2px 4px 2px 0; padding:2px 8px;
-                      border-radius:999px; background:#f1f3f5; border:1px solid #e1e5ea;
-                      font-size:12px;">${g}</span>`).join(' ');
-                }
-            """)
-        },
-        {
-            "headerName": "Current Status", "field": "Current Status", "filter": True, "sortable": True,
-            "cellRenderer": dag.JsCode("""
-                function(params) {
-                  const text = params.value || '';
-                  const color = (params.data && params.data.StatusColor) ? params.data.StatusColor : '#e6e6e6';
-                  const dot = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;
-                                 background:${color};border:1px solid rgba(0,0,0,.18);margin-right:6px;"></span>`;
-                  const pill = `<span style="display:inline-block; padding:2px 8px; border-radius:999px;
-                                   background:${color}; border:1px solid rgba(0,0,0,.10); font-size:12px;">${text || '—'}</span>`;
-                  return dot + pill;
-                }
-            """)
-        },
-        {"headerName": "Complaints", "field": "Complaints", "filter": True, "sortable": True, "width": 130},
-        {"headerName": "Latest Complaint", "field": "Latest Complaint", "filter": True, "sortable": True, "flex": 1},
-        {"headerName": "Latest Onset", "field": "Latest Onset", "filter": True, "sortable": True, "width": 140},
-        {"headerName": "Latest Priority", "field": "Latest Priority", "filter": True, "sortable": True, "width": 160},
-        {"headerName": "CID", "field": "CID", "hide": True},
+        {"headerName": "Athlete", "field": "Athlete", "flex": 2, "filter": True, "sortable": True},
+        {"headerName": "Groups", "field": "Groups", "flex": 2, "cellRenderer": pill_renderer},
+        {"headerName": "Current Status", "field": "Current Status",
+         "cellRenderer": status_renderer, "flex": 2, "filter": True, "sortable": True},
+        {"headerName": "Complaints", "field": "Complaints", "flex": 3, "cellRenderer": pill_renderer},
+        {"headerName": "Last Appt", "field": "Last Appt", "flex": 1, "filter": True, "sortable": True},
     ]
 
     grid = dag.AgGrid(
@@ -450,109 +154,257 @@ def t1_build_grid(_n_clicks, groups, customers, cid_to_groups):
             "floatingFilter": True,
         },
         dashGridOptions={
-            "rowSelection": "single",
+            # Fix deprecation by using object form
+            "rowSelection": {"mode": "single"},
             "animateRows": True,
             "pagination": True,
-            "paginationPageSize": 15,
+            "paginationPageSize": 20,
+            "paginationPageSizeSelector": [10, 20, 50, 100],
             "suppressRowClickSelection": False,
             "ensureDomOrder": True,
             "domLayout": "normal",
         },
         className="ag-theme-quartz",
         style={"height": "520px", "width": "100%"},
-        dangerously_allow_code=True,   # ← add this
+        dangerously_allow_code=True,  # REQUIRED for JsCode renderers
     )
+    return grid
 
-
-    return grid, rows
-
-# Quick filter for AG Grid
-@app.callback(
-    Output("t1-grid", "quickFilterText"),
-    Input("t1-quick-filter", "value"),
-    prevent_initial_call=True
+# ──────────────────────────────────────────────────────────────────────
+# App + layout (same shell structure as your repo)
+app = Dash(
+    __name__,
+    server=server,
+    external_stylesheets=[
+        dbc.themes.BOOTSTRAP,
+        "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css",
+    ],
+    suppress_callback_exceptions=True,
 )
-def t1_quick_filter(val):
-    return val or ""
 
-# When selecting a row, populate athlete dropdown and load complaints (Tab 1 independent complaints fetch)
+# Navbar user slot (same pattern you added recently)
+navbar_right = html.Span(id="navbar-user", className="text-white-50 small", children="")
+
+app.layout = html.Div([
+    dcc.Location(id="redirect-to", refresh=True),
+    dcc.Interval(id="init-interval", interval=500, n_intervals=0, max_intervals=1),
+
+    # Poll for user label (optional; can be longer)
+    dcc.Interval(id="user-refresh", interval=60_000, n_intervals=0),
+
+    Navbar([navbar_right]).render(),
+
+    dbc.Container([
+        dcc.Tabs(id="tabs", value="tab1", children=[
+            dcc.Tab(label="Athletes (by Group)", value="tab1"),
+            dcc.Tab(label="Training Dashboard",  value="tab2"),
+        ], className="mb-3"),
+
+        html.Div(id="tab-content")
+    ], fluid=True),
+
+    Footer().render(),
+])
+
+# ──────────────────────────────────────────────────────────────────────
+# Tab content builders
+def render_tab1():
+    return dbc.Container([
+        dbc.Row([
+            dbc.Col(dcc.Dropdown(id="t1-group-dd", options=GROUP_OPTS, multi=True,
+                                 placeholder="Select patient group(s) …"), md=6),
+            dbc.Col(dbc.Button("Load", id="t1-load", color="primary", className="w-100"), md=2),
+        ], className="g-2 mb-3"),
+
+        dbc.Alert(id="t1-msg", is_open=False, color="danger", duration=0),
+
+        html.Div(id="t1-grid-container"),
+        dcc.Store(id="t1-rows-json")
+    ], fluid=True)
+
+def render_tab2():
+    # Defer importing layout builder to avoid circulars
+    from training_dashboard import layout_body as training_layout_body
+    return training_layout_body()
+
+@app.callback(Output("tab-content", "children"), Input("tabs", "value"))
+def tabs_router(val):
+    if val == "tab1":
+        return render_tab1()
+    elif val == "tab2":
+        return render_tab2()
+    return html.Div()
+
+# ──────────────────────────────────────────────────────────────────────
+# Init/login & user label (same as earlier)
 @app.callback(
-    Output("t1-athlete", "options"),
-    Output("t1-athlete", "value"),
-    Output("t1-complaint", "options"),
-    Output("t1-complaint", "value"),
-    Output("t1-comments-grid", "rowData"),
-    Output("t1-selected-cid", "data"),
-    State("t1-customers", "data"),
-    Input("t1-grid", "selectedRows"),
-    prevent_initial_call=True
+    Output("redirect-to", "href"),
+    Output("navbar-user", "children"),
+    Input("init-interval", "n_intervals")
 )
-def t1_pick_athlete(customers, selected_rows):
-    if not selected_rows:
-        raise PreventUpdate
-    row = selected_rows[0]
-    cid = int(row.get("CID"))
-    cust = (customers or {}).get(str(cid)) or (customers or {}).get(cid) or {}
-    label = f"{cust.get('first_name','')} {cust.get('last_name','')} (ID {cid})".strip()
-
-    # Fetch complaints independently for Tab 1, using the same helper from training_dashboard (safe to import)
-    complaints = fetch_customer_complaints(cid)
-    c_opts = [{"label": (c["Title"] or "(untitled)"), "value": (c["Title"] or "")}
-              for c in complaints if (c.get("Title") or "").strip()]
-
-    comments = db2_list_for_athlete(cid)
-
-    return [{"label": label, "value": cid}], cid, c_opts, (c_opts[0]["value"] if c_opts else None), comments, cid
-
-# Save comment (Tab 1)
-@app.callback(
-    Output("t1-comments-grid", "rowData", allow_duplicate=True),
-    Output("t1-save-msg", "children"),
-    State("t1-selected-cid", "data"),
-    State("t1-athlete", "options"),
-    State("t1-complaint", "value"),
-    State("t1-comment", "value"),
-    State("t1-user-json", "data"),
-    Input("t1-save", "n_clicks"),
-    prevent_initial_call=True
-)
-def t1_save_comment(cid, athlete_opts, complaint_value, comment_text, user_json, n_clicks):
-    if not n_clicks:
-        raise PreventUpdate
-    if not cid or not complaint_value or not (comment_text or "").strip():
-        return dash.no_update, "Please choose an athlete, a complaint, and enter a comment."
-
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-
-    name  = (user_json or {}).get("name") or (f"{(user_json or {}).get('first_name','')} {(user_json or {}).get('last_name','')}".strip())
-    email = (user_json or {}).get("email") or ((user_json or {}).get("user") or {}).get("email")
-
-    athlete_label = ""
-    if athlete_opts:
-        for o in athlete_opts:
-            if int(o["value"]) == int(cid):
-                athlete_label = o["label"]; break
-    if not athlete_label:
-        athlete_label = f"ID {cid}"
-
-    # Pull complaint status (using training_dashboard helper again)
-    status = ""
+def initial_view(n):
+    # Check OAuth token
     try:
-        comps = fetch_customer_complaints(int(cid))
-        for c in comps:
-            if (c.get("Title") or "").strip().lower() == (complaint_value or "").strip().lower():
-                status = c.get("Status") or ""
-                break
+        token = auth.get_token()
     except Exception:
-        pass
+        token = None
 
-    db2_add(today, name or "Unknown", email or "", int(cid), athlete_label, complaint_value, status, (comment_text or "").strip())
-    data = db2_list_for_athlete(int(cid))
-    return data, "Saved."
+    if not token:
+        # kick to login if needed
+        return "login", ""
 
-# ------------------------- Wire up existing Training Dashboard (Tab 2) -------------------------
-training_register_callbacks(app)
+    # Populate user label
+    try:
+        headers = {"Authorization": f"Bearer {token}"}
+        # canonical me endpoint
+        url = f"{SITE_URL.rstrip('/')}/api/csiauth/me/"
+        resp = requests.get(url, headers=headers, timeout=6)
+        resp.raise_for_status()
+        me = resp.json() or {}
+        first = me.get("first_name") or ""
+        last  = me.get("last_name")  or ""
+        email = me.get("email") or ""
+        label = (first + " " + last).strip() or email
+        return no_update, f"Signed in as: {label}"
+    except Exception:
+        return no_update, ""
 
-# ------------------------- Run -------------------------
+# Optional refresh (if you want the label to update without reload)
+@app.callback(Output("navbar-user", "children", allow_duplicate=True),
+              Input("user-refresh", "n_intervals"), prevent_initial_call=True)
+def refresh_user_label(_):
+    try:
+        token = auth.get_token()
+        if not token:
+            return no_update
+        headers = {"Authorization": f"Bearer {token}"}
+        url = f"{SITE_URL.rstrip('/')}/api/csiauth/me/"
+        resp = requests.get(url, headers=headers, timeout=6)
+        resp.raise_for_status()
+        me = resp.json() or {}
+        first = me.get("first_name") or ""
+        last  = me.get("last_name")  or ""
+        email = me.get("email") or ""
+        label = (first + " " + last).strip() or email
+        return f"Signed in as: {label}"
+    except Exception:
+        return no_update
+
+# ──────────────────────────────────────────────────────────────────────
+# Tab 1: fetch & render grid (independent of Tab 2)
+@app.callback(
+    Output("t1-grid-container", "children"),
+    Output("t1-rows-json", "data"),
+    Output("t1-msg", "children"),
+    Output("t1-msg", "is_open"),
+    Input("t1-load", "n_clicks"),
+    State("t1-group-dd", "value"),
+    prevent_initial_call=True
+)
+def t1_fetch_and_render(n_clicks, group_values):
+    try:
+        _require_api_key()  # fail fast if missing
+        if not group_values:
+            return no_update, no_update, "Select at least one group.", True
+
+        # 1) Fetch customers (same way as training_dashboard.py, but fresh call here)
+        customers_by_id = fetch_customers_full()
+
+        # Build groups map
+        def groups_of(cust: dict):
+            src = cust.get("groups") if "groups" in cust else cust.get("group")
+            names = []
+            if isinstance(src, list):
+                for it in src:
+                    if isinstance(it, str): names.append(_norm(it))
+                    elif isinstance(it, dict) and it.get("name"): names.append(_norm(it["name"]))
+            elif isinstance(src, dict) and src.get("name"):
+                names.append(_norm(src["name"]))
+            elif isinstance(src, str):
+                names.append(_norm(src))
+            return names
+
+        cid_to_groups = {cid: groups_of(c) for cid, c in customers_by_id.items()}
+
+        # Filter customers to selected groups
+        targets = {_norm(g) for g in group_values}
+        filtered_cids = [
+            cid for cid, gs in cid_to_groups.items()
+            if targets & set(gs)
+        ]
+
+        if not filtered_cids:
+            return html.Div("No athletes found for those groups."), [], "", False
+
+        # 2) Build rows: need appointments, status, complaints
+        #    For perf, we’ll fetch appointments once (branch=1) and map them per-customer.
+        #    Using the same endpoint as your TD code.
+        rows = []
+        # Slurp branch-1 appts (paged)
+        def fetch_branch_appts(branch=1):
+            rows_, page = [], 1
+            while True:
+                js = _get(f"appointments/list/{branch}",
+                          start_date="2000-01-01", status="all", page=page, count=100)
+                block = js.get("list", js)
+                if not block: break
+                rows_.extend(block)
+                if len(block) < 100: break
+                page += 1
+            return rows_
+
+        appts = fetch_branch_appts(1)
+        cid_to_appts = {}
+        for ap in appts:
+            cust = ap.get("customer", {})
+            if isinstance(cust, dict) and cust.get("id"):
+                cid_to_appts.setdefault(cust["id"], []).append(ap)
+
+        for cid in filtered_cids:
+            cust = customers_by_id.get(cid, {}) or {}
+            first = cust.get("first_name", "") or ""
+            last  = cust.get("last_name", "") or ""
+            athlete_label = f"{first} {last}".strip() or f"ID {cid}"
+
+            # groups (pretty case for pills)
+            grp_display = [g.title() for g in cid_to_groups.get(cid, [])]
+
+            # status & last appt from this customer's appointments
+            my_appts = cid_to_appts.get(cid, [])
+            current_status = _current_training_status_for_customer(my_appts)
+            last_appt = _last_appt_date(my_appts)
+
+            # complaints (from customer-level + appt-level merge; same helper as TD)
+            complaints = [c["Title"] for c in fetch_customer_complaints(cid) if c.get("Title")]
+
+            rows.append({
+                "Athlete": athlete_label,
+                "Groups": grp_display,                 # array → pill renderer
+                "Current Status": _status_dot_html(current_status),
+                "Complaints": complaints,              # array → pill renderer
+                "Last Appt": last_appt,
+            })
+
+        # Sort by athlete for stability
+        rows.sort(key=lambda r: r["Athlete"].lower())
+
+        grid = t1_build_grid(rows)
+        rows_json = json.loads(json.dumps(rows, default=_json_safe))
+        return grid, rows_json, "", False
+
+    except Exception as e:
+        # Show message but don't crash the app
+        return no_update, no_update, f"Error: {e}", True
+
+# ──────────────────────────────────────────────────────────────────────
+# Tab 2: wire up the existing training dashboard callbacks
+def _register_training_callbacks(app: Dash):
+    from training_dashboard import register_callbacks as td_register_callbacks
+    td_register_callbacks(app)
+
+_register_training_callbacks(app)
+
+# ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Locally run on 8050; on Connect, the launcher takes over.
     app.run(debug=False, port=8050)
