@@ -16,7 +16,7 @@ from dash.exceptions import PreventUpdate
 
 # Repo-auth + layout
 from dash_auth_external import DashAuthExternal
-from layout import Footer, Navbar, Pagination, GeographyFilters  # Pagination, GeographyFilters unused but keeps parity
+from layout import Footer, Navbar, Pagination, GeographyFilters  # Pagination, GeographyFilters kept for parity
 from settings import *  # AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLIENT_SECRET
 
 # Reuse your working Juvonno + dashboard plumbing
@@ -94,7 +94,6 @@ def _latest_status_fast(appt_list):
 
 # ────────────────────────────────────────────────────────────
 # Comments persistence (extend the same DB used by training_dashboard)
-# We add columns author, complaint, status if they don't exist.
 
 def _ensure_comment_columns():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -161,31 +160,6 @@ app = Dash(
 
 navbar_right = html.Span(id="navbar-user", className="text-white-50 small", children="")
 
-app.layout = html.Div([
-    dcc.Location(id="redirect-to", refresh=True),
-    dcc.Interval(id="init-interval", interval=500, n_intervals=0, max_intervals=1),
-    dcc.Interval(id="user-refresh", interval=60_000, n_intervals=0),
-
-    Navbar([navbar_right]).render(),
-
-    dbc.Container([
-        dcc.Tabs(id="tabs", value="tab1", children=[
-            dcc.Tab(label="Athletes (by Group)", value="tab1"),
-            dcc.Tab(label="Training Dashboard",  value="tab2"),
-        ], className="mb-3"),
-
-        html.Div(id="tab-content")
-    ], fluid=True),
-
-    # store current user JSON for comments author
-    dcc.Store(id="me-json", data=None),
-
-    Footer().render(),
-])
-
-# ────────────────────────────────────────────────────────────
-# Tab content builders
-
 def render_tab1():
     return dbc.Container([
         dbc.Row([
@@ -193,6 +167,17 @@ def render_tab1():
                                  placeholder="Select patient group(s) …"), md=6),
             dbc.Col(dbc.Button("Load", id="t1-load", color="primary", className="w-100"), md=2),
         ], className="g-2 mb-3"),
+
+        # Helpful banner if API key is missing
+        html.Div(
+            id="t1-apikey-warning",
+            children=(
+                "" if os.getenv("JUV_API_KEY")
+                else "Missing JUV_API_KEY environment variable — set it in Posit Connect → Variables."
+            ),
+            className=("alert alert-warning" if not os.getenv("JUV_API_KEY") else ""),
+            style={"display": ("" if not os.getenv("JUV_API_KEY") else "none")}
+        ),
 
         dbc.Alert(id="t1-msg", is_open=False, color="danger", duration=0),
 
@@ -246,6 +231,31 @@ def render_tab1():
 def render_tab2():
     return training_layout_body()
 
+app.layout = html.Div([
+    dcc.Location(id="redirect-to", refresh=True),
+    dcc.Interval(id="init-interval", interval=500, n_intervals=0, max_intervals=1),
+    dcc.Interval(id="user-refresh", interval=60_000, n_intervals=0),
+
+    Navbar([navbar_right]).render(),
+
+    dbc.Container([
+        dcc.Tabs(id="tabs", value="tab1", children=[
+            dcc.Tab(label="Athletes (by Group)", value="tab1"),
+            dcc.Tab(label="Training Dashboard",  value="tab2"),
+        ], className="mb-3"),
+
+        # 👇 **Initial content so the page is not blank on first load**
+        html.Div(id="tab-content", children=render_tab1())
+    ], fluid=True),
+
+    # store current user JSON for comments author
+    dcc.Store(id="me-json", data=None),
+
+    Footer().render(),
+])
+
+# ────────────────────────────────────────────────────────────
+# Tab switching (kept)
 @app.callback(Output("tab-content", "children"), Input("tabs", "value"))
 def tabs_router(val):
     if val == "tab1":
@@ -256,7 +266,6 @@ def tabs_router(val):
 
 # ────────────────────────────────────────────────────────────
 # Init/login & navbar badge + cache user in Store
-
 @app.callback(
     Output("redirect-to", "href"),
     Output("navbar-user", "children"),
@@ -307,7 +316,7 @@ def refresh_user_label(_):
         return no_update
 
 # ────────────────────────────────────────────────────────────
-# Tab 1: fetch & render athletes grid (FAST) — no pills, no HTML renderers
+# Tab 1 data + interactions
 
 def _build_grid(rows):
     col_defs = [
@@ -350,10 +359,8 @@ def t1_fetch(n_clicks, group_values):
         if not group_values:
             return no_update, no_update, "Select at least one group.", True
 
-        # Fresh fetch of customers (same approach as training_dashboard)
         customers_by_id = fetch_customers_full()
 
-        # groups per customer
         def groups_of(cust: dict):
             src = cust.get("groups") if "groups" in cust else cust.get("group")
             names = []
@@ -374,7 +381,6 @@ def t1_fetch(n_clicks, group_values):
         if not filtered_cids:
             return html.Div("No athletes found for those groups."), [], "", False
 
-        # Fetch appointments once (branch 1) and map to customers
         def fetch_branch_appts(branch=1):
             rows_, page = [], 1
             while True:
@@ -394,7 +400,6 @@ def t1_fetch(n_clicks, group_values):
             if isinstance(cust, dict) and cust.get("id"):
                 cid_to_appts.setdefault(cust["id"], []).append(ap)
 
-        # Build rows (FAST, no complaints here)
         rows = []
         for cid in filtered_cids:
             cust = customers_by_id.get(cid, {}) or {}
@@ -405,7 +410,6 @@ def t1_fetch(n_clicks, group_values):
             grp_display = ", ".join(g.title() for g in cid_to_groups.get(cid, []))
             my_appts    = cid_to_appts.get(cid, [])
 
-            # Status & last appt
             current_status = _latest_status_fast(my_appts) or "—"
             last_appt     = _last_appt_date(my_appts)
 
@@ -426,11 +430,6 @@ def t1_fetch(n_clicks, group_values):
     except Exception as e:
         return no_update, no_update, f"Error: {e}", True
 
-# When the user selects a row in the grid:
-#  - Remember selected cid
-#  - Build complaint dropdown options (for that athlete only)
-#  - Default date = today
-#  - Refresh comments grid for that athlete
 @app.callback(
     Output("t1-selected-cid", "data"),
     Output("t1-complaint-dd", "options"),
@@ -445,17 +444,12 @@ def t1_fetch(n_clicks, group_values):
 def t1_on_select(selected_rows, rows_json):
     if not selected_rows:
         raise PreventUpdate
-
     try:
         sel = selected_rows[0]
         cid = int(sel.get("_cid"))
     except Exception:
         raise PreventUpdate
 
-    # Build complaints for this athlete (only now, for speed)
-    # We recreate the minimal appointments list for this cid
-    # by reading back from rows_json? We need actual appts; fetch now:
-    # Use the same quick fetch as above but filtered by customer inline
     complaints = set()
     page = 1
     while True:
@@ -466,7 +460,6 @@ def t1_on_select(selected_rows, rows_json):
             cust = ap.get("customer") or {}
             if isinstance(cust, dict) and int(cust.get("id", -1)) == cid:
                 aid = ap.get("id")
-                # structured appointment complaints
                 try:
                     for rec in list_complaints_for_appt(aid):
                         for k in ("name","title","problem","injury","body_part","complaint"):
@@ -475,7 +468,6 @@ def t1_on_select(selected_rows, rows_json):
                                 complaints.add(v.strip()); break
                 except Exception:
                     pass
-                # inline complaint
                 comp_inline = ap.get("complaint")
                 if isinstance(comp_inline, dict):
                     for k in ("name","title","problem","injury","body_part","complaint"):
@@ -487,8 +479,6 @@ def t1_on_select(selected_rows, rows_json):
 
     opts = [{"label": c, "value": c} for c in sorted(complaints)]
     default_val = opts[0]["value"] if opts else None
-
-    # Load existing comments for this athlete
     comments = list_comments_for_customer(cid)
 
     return (
@@ -499,7 +489,6 @@ def t1_on_select(selected_rows, rows_json):
         comments
     )
 
-# Save comment (Tab 1) with author + status → DB; refresh table and clear textarea
 @app.callback(
     Output("t1-comments-grid", "rowData"),
     Output("t1-comment-text", "value"),
@@ -516,7 +505,6 @@ def t1_save_comment(selected_cid, rows_json, complaint, date_str, text, me_json,
     if not selected_cid or not date_str or not (text or "").strip():
         raise PreventUpdate
 
-    # Find athlete label + status from the rows_json
     label = f"ID {selected_cid}"
     status = ""
     if rows_json:
@@ -542,10 +530,8 @@ def t1_save_comment(selected_cid, rows_json, complaint, date_str, text, me_json,
         complaint=complaint or "",
         status=status or "",
     )
-    # Refresh comments + clear textarea
     return list_comments_for_customer(int(selected_cid)), ""
 
-# Also refresh comments grid when tab switches back to tab1 (optional safety)
 @app.callback(
     Output("t1-comments-grid", "rowData", allow_duplicate=True),
     Input("tabs", "value"),
