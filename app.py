@@ -130,28 +130,24 @@ def tab1_layout():
                 dash_table.DataTable(
                     id="t1-comments-table",
                     columns=[
-                        {"name":"Date","id":"Date", "editable": False},
-                        {"name":"By","id":"By", "editable": False},
-                        {"name":"Athlete","id":"Athlete", "editable": False},
-                        {"name":"Complaint","id":"Complaint", "editable": False},
-                        {"name":"Status","id":"Status", "editable": False},
-                        {"name":"Comment","id":"Comment", "editable": True},  # ONLY this column editable
-                        {"name":"_id","id":"_id", "hidden": True, "editable": False},
+                        {"name":"Date","id":"Date"},
+                        {"name":"By","id":"By"},
+                        {"name":"Athlete","id":"Athlete"},
+                        {"name":"Complaint","id":"Complaint"},
+                        {"name":"Status","id":"Status"},
+                        {"name":"Comment","id":"Comment", "editable": True},
+                        # Hidden technical id used for edit/delete
+                        {"name":"_id","id":"_id", "hidden": True},
                     ],
                     data=[],
                     row_deletable=True,               # delete icon per row
-                    editable=True,                    # per-column overrides above
+                    editable=True,                    # allow inline edit of editable columns
                     page_action="none",               # we use scroll, not pagination
                     style_table={
                         "overflowX": "auto",
                         "maxHeight": "240px",         # ~5 rows visible then scroll
                         "overflowY": "auto",
                     },
-                    # Make delete button cell light red
-                    css=[{
-                        "selector": ".dash-table-container .dash-spreadsheet-container td.dash-delete-cell",
-                        "rule": "background-color: #fdecea; border-right: 1px solid #f5c6cb;"
-                    }],
                     # Uniform spacing across cells/rows
                     style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","lineHeight":"22px"},
                     style_cell={"padding":"9px","fontSize":14,"lineHeight":"22px",
@@ -160,9 +156,6 @@ def tab1_layout():
                     style_data={"borderBottom":"1px solid #eceff4"},
                     style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
                 ),
-
-                # MOVED: comment update flag to bottom of the card
-                dbc.Alert(id="t1-comment-msg", is_open=False, color="info", className="mt-3", duration=3000),
             ])
         ], className="mb-4"),
 
@@ -472,8 +465,8 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
 
 # ------------------------- Tab 1: Persist edits/deletes -------------------------
 @app.callback(
-    Output("t1-comment-msg", "is_open", allow_duplicate=True),
-    Output("t1-comment-msg", "children", allow_duplicate=True),
+    Output("t1-msg", "is_open", allow_duplicate=True),
+    Output("t1-msg", "children", allow_duplicate=True),
     Input("t1-comments-table", "data_timestamp"),
     State("t1-comments-table", "data"),
     State("t1-comments-table", "data_previous"),
@@ -592,4 +585,5 @@ td.register_callbacks(app)
 
 # ------------------------- Main -------------------------
 if __name__ == "__main__":
+    # IMPORTANT: provide a body so the block is valid
     app.run(debug=False, port=8050)
