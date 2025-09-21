@@ -183,8 +183,7 @@ def tab1_layout():
                     style_data={"borderBottom":"1px solid #eceff4"},
                     style_data_conditional=[
                         {"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"},
-                        # highlight delete rows (handled visually when the row disappears; this is a soft hint)
-                        {"if": {"state": "selected"}, "backgroundColor": "#fdecea"},
+                        {"if": {"state": "selected"}, "backgroundColor": "#fdecea"},  # light red when selected
                     ],
                 ),
 
@@ -440,6 +439,7 @@ def t1_load_customers(n_clicks, group_values):
     Output("t1-comment-status", "children", allow_duplicate=True),  # clear badge on selection
     Input("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
+    prevent_initial_call=True,  # <-- REQUIRED when using allow_duplicate in outputs
 )
 def t1_on_select(selected_rows, rows_json):
     if not rows_json:
