@@ -41,6 +41,12 @@ assets_path = os.path.join(here, "assets")
 server.static_folder = assets_path
 server.static_url_path = "/assets"
 
+# Ensure the comments DB exists on first run (prevents first-select oddities)
+try:
+    td._db().close()
+except Exception:
+    pass
+
 
 # ------------------------- Small helpers (pills/dots/colors) -------------------------
 PILL_BG_DEFAULT = "#eef2f7"
@@ -81,26 +87,27 @@ def dot(hex_color: str, size: int = 10, mr: int = 8) -> str:
         f'border:1px solid rgba(0,0,0,.25)"></span>'
     )
 
-# Small green status badge html
-def status_badge(text: str) -> str:
+def status_badge(text: str):
+    """
+    Return a small green pill-style badge as a Dash component
+    (prevents raw HTML from showing in the UI).
+    """
     if not text:
         return ""
-    return (
-        '<span style="display:inline-block;padding:2px 8px;border-radius:999px;'
-        'background:#e9f7ef;color:#0f5132;border:1px solid #badbcc;'
-        'font-size:12px;line-height:18px;white-space:nowrap;">'
-        f'{html_escape(text)}</span>'
+    return html.Span(
+        text,
+        style={
+            "display": "inline-block",
+            "padding": "2px 8px",
+            "borderRadius": "999px",
+            "background": "#e9f7ef",  # light green
+            "color": "#0f5132",
+            "border": "1px solid #badbcc",
+            "fontSize": "12px",
+            "lineHeight": "18px",
+            "whiteSpace": "nowrap",
+        },
     )
-
-
-# ------------------------- Ensure SQLite table exists (first-run fix) -------------------------
-def _ensure_comments_table():
-    """
-    Guarantees the comments table exists even before the first saved comment.
-    Uses training_dashboard._db() which creates the table if needed.
-    """
-    conn = td._db()
-    conn.close()
 
 
 # ------------------------- Tab 1 (Overview) Layout -------------------------
@@ -134,25 +141,18 @@ def tab1_layout():
             ]),
             dbc.CardBody([
                 dbc.Row([
-                    dbc.Col(dcc.DatePickerSingle(
-                        id="t1-comment-date",
-                        display_format="YYYY-MM-DD"
-                    ), md=3),
-                    dbc.Col(dcc.Dropdown(
-                        id="t1-complaint-dd",
-                        placeholder="Pick a complaint (optional)…"
-                    ), md=4),
+                    dbc.Col(dcc.DatePickerSingle(id="t1-comment-date", display_format="YYYY-MM-DD"), md=3),
+                    dbc.Col(dcc.Dropdown(id="t1-complaint-dd", placeholder="Pick a complaint (optional)…"), md=4),
                     dbc.Col(dcc.Textarea(
                         id="t1-comment-text",
                         placeholder="Add a note about the selected athlete…",
                         style={"width":"100%","height":"80px"}), md=5),
                 ], className="g-2"),
-
                 dbc.Row([
                     dbc.Col(dbc.Button("Save Comment", id="t1-save-comment", color="success"), width="auto"),
                 ], className="g-2 mt-2"),
 
-                html.Hr(className="mt-3 mb-2"),
+                html.Hr(),
 
                 dash_table.DataTable(
                     id="t1-comments-table",
@@ -162,13 +162,13 @@ def tab1_layout():
                         {"name":"Athlete","id":"Athlete"},
                         {"name":"Complaint","id":"Complaint"},
                         {"name":"Status","id":"Status"},
-                        {"name":"Comment","id":"Comment", "editable": True},  # only this is editable
+                        {"name":"Comment","id":"Comment", "editable": True},  # only editable column
                         # Hidden technical id used for edit/delete
                         {"name":"_id","id":"_id", "hidden": True},
                     ],
                     data=[],
                     row_deletable=True,               # delete icon per row
-                    editable=False,                   # table-level false; only "Comment" editable
+                    editable=True,                    # allow inline edit of editable columns
                     page_action="none",               # we use scroll, not pagination
                     style_table={
                         "overflowX": "auto",
@@ -181,10 +181,14 @@ def tab1_layout():
                                 "fontFamily":"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
                                 "textAlign":"left"},
                     style_data={"borderBottom":"1px solid #eceff4"},
-                    style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
+                    style_data_conditional=[
+                        {"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"},
+                        # highlight delete rows (handled visually when the row disappears; this is a soft hint)
+                        {"if": {"state": "selected"}, "backgroundColor": "#fdecea"},
+                    ],
                 ),
 
-                # Compact green status badge sits at the bottom of the card
+                # slim status badge at the very bottom
                 html.Div(id="t1-comment-status", className="mt-2"),
             ])
         ], className="mb-4"),
@@ -207,9 +211,6 @@ app = Dash(
     ],
     suppress_callback_exceptions=True,
 )
-
-# Ensure DB exists on startup (first-run fix)
-_ensure_comments_table()
 
 app.layout = html.Div([
     dcc.Location(id="redirect-to", refresh=True),
@@ -436,20 +437,18 @@ def t1_load_customers(n_clicks, group_values):
     Output("t1-comments-table", "data"),
     Output("t1-selected-athlete-label", "children"),
     Output("t1-comment-date", "date"),
-    Output("t1-comment-status", "children"),
+    Output("t1-comment-status", "children", allow_duplicate=True),  # clear badge on selection
     Input("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
 )
 def t1_on_select(selected_rows, rows_json):
-    _ensure_comments_table()  # first-run safety
     if not rows_json:
         raise PreventUpdate
 
-    # Default "today" for the date picker
+    # Always set today's date and clear any prior status badge
     today = date.today().strftime("%Y-%m-%d")
 
     if not selected_rows:
-        # Clear complaints & table; clear status; clear header label
         return [], None, [], "", today, ""
 
     row = rows_json[selected_rows[0]]
@@ -466,7 +465,6 @@ def t1_on_select(selected_rows, rows_json):
     comments = _db_list_comments_with_ids([cid])
     expanded = [_expand_comment_record(rec, label) for rec in comments]
 
-    # Clear status badge on fresh selection
     return opts, val, expanded, f" — {label}", today, ""
 
 
@@ -474,6 +472,7 @@ def t1_on_select(selected_rows, rows_json):
 @app.callback(
     Output("t1-comments-table", "data", allow_duplicate=True),
     Output("t1-comment-status", "children", allow_duplicate=True),
+    Output("t1-comment-text", "value", allow_duplicate=True),  # clear textarea
     State("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
     State("t1-complaint-dd", "value"),
@@ -483,7 +482,6 @@ def t1_on_select(selected_rows, rows_json):
     prevent_initial_call=True,
 )
 def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
-    _ensure_comments_table()
     if not _n or not rows_json or not selected_rows or not date_str or not (text or "").strip():
         raise PreventUpdate
 
@@ -499,7 +497,7 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
 
     comments = _db_list_comments_with_ids([cid])
     expanded = [_expand_comment_record(rec, label, override_by=by_who, override_complaint=complaint) for rec in comments]
-    return expanded, status_badge("Comment saved.")
+    return expanded, status_badge("Comment saved."), ""
 
 
 # ------------------------- Tab 1: Persist edits/deletes -------------------------
@@ -514,7 +512,6 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
     """
     Detect row deletes or inline edits and update SQLite accordingly.
     """
-    _ensure_comments_table()
     try:
         if data_prev is None:
             raise PreventUpdate
@@ -543,7 +540,15 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
             return status_badge("Comment updated.")
         raise PreventUpdate
     except Exception as e:
-        return status_badge(f"Comment persistence error: {e}")
+        # use a red-ish badge on error
+        return html.Span(
+            f"Comment persistence error: {e}",
+            style={
+                "display": "inline-block", "padding": "2px 8px", "borderRadius": "999px",
+                "background": "#fdecea", "color": "#5f2120", "border": "1px solid #f5c2c7",
+                "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap",
+            },
+        )
 
 
 # =========================
@@ -553,7 +558,6 @@ def _db_connect():
     return sqlite3.connect(td.DB_PATH, check_same_thread=False)
 
 def _db_list_comments_with_ids(customer_ids):
-    _ensure_comments_table()
     conn = _db_connect(); cur = conn.cursor()
     if customer_ids:
         vals = [int(x) for x in customer_ids]
