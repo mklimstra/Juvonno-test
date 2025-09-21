@@ -1,7 +1,6 @@
 # app.py
 import os
 import json
-import math
 import hashlib
 import sqlite3
 from datetime import date
@@ -81,6 +80,14 @@ def dot(hex_color: str, size: int = 10, mr: int = 8) -> str:
         f'border:1px solid rgba(0,0,0,.25)"></span>'
     )
 
+def green_badge(msg: str) -> str:
+    # subtle green pill for status messages
+    return (
+        '<span style="display:inline-block;padding:2px 8px;border-radius:999px;'
+        'background:#e9f7ef;color:#0f5132;border:1px solid #badbcc;'
+        'font-size:12px;line-height:18px;white-space:nowrap;">' + html_escape(msg or "") + '</span>'
+    )
+
 
 # ------------------------- Tab 1 (Overview) Layout -------------------------
 def tab1_layout():
@@ -97,7 +104,6 @@ def tab1_layout():
             dbc.Col(dbc.Button("Load", id="t1-load", color="primary", className="w-100"), md=2),
         ], className="g-2 mb-2"),
 
-        # general error banner for tab 1
         dbc.Alert(id="t1-msg", is_open=False, color="danger"),
 
         # main table
@@ -114,16 +120,14 @@ def tab1_layout():
             ]),
             dbc.CardBody([
                 dbc.Row([
-                    dbc.Col(dcc.DatePickerSingle(
-                        id="t1-comment-date",
-                        display_format="YYYY-MM-DD"
-                    ), md=3),
+                    dbc.Col(dcc.DatePickerSingle(id="t1-comment-date", display_format="YYYY-MM-DD"), md=3),
                     dbc.Col(dcc.Dropdown(id="t1-complaint-dd", placeholder="Pick a complaint (optional)…"), md=4),
                     dbc.Col(dcc.Textarea(
                         id="t1-comment-text",
                         placeholder="Add a note about the selected athlete…",
                         style={"width":"100%","height":"80px"}), md=5),
                 ], className="g-2"),
+
                 dbc.Row([
                     dbc.Col(dbc.Button("Save Comment", id="t1-save-comment", color="success"), width="auto"),
                 ], className="g-2 mt-2"),
@@ -139,11 +143,11 @@ def tab1_layout():
                         {"name":"Complaint","id":"Complaint", "editable": False},
                         {"name":"Status","id":"Status", "editable": False},
                         {"name":"Comment","id":"Comment", "editable": True},   # only this is editable
-                        {"name":"_id","id":"_id", "hidden": True, "editable": False},  # internal id
+                        {"name":"_id","id":"_id", "hidden": True, "editable": False},
                     ],
                     data=[],
                     row_deletable=True,               # delete icon per row
-                    editable=False,                   # table-level; per-column overrides apply
+                    editable=True,                    # table-level enabled; per-column flags above
                     page_action="none",               # we use scroll, not pagination
                     style_table={
                         "overflowX": "auto",
@@ -156,28 +160,18 @@ def tab1_layout():
                                 "fontFamily":"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
                                 "textAlign":"left"},
                     style_data={"borderBottom":"1px solid #eceff4"},
-                    style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
+                    style_data_conditional=[
+                        {"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"},
+                    ],
+                    # Light red background for the delete control column (CSS hook)
+                    css=[{
+                        "selector": ".dash-table-container .dash-spreadsheet-container .dash-spreadsheet .dash-delete-cell",
+                        "rule": "background-color:#fff5f5;"
+                    }],
                 ),
 
-                # small, stylish success flag at the BOTTOM of card
-                html.Div(
-                    dbc.Alert(
-                        id="t1-comment-status",
-                        is_open=False,
-                        color="success",
-                        className="py-1 px-2",
-                        style={
-                            "backgroundColor": "#eaf7ea",
-                            "border": "1px solid #cfe9cf",
-                            "color": "#1f7a1f",
-                            "fontSize": "12px",
-                            "display": "inline-block",
-                            "marginTop": "10px",
-                            "borderRadius": "6px"
-                        }
-                    ),
-                    className="d-flex justify-content-end"
-                ),
+                # Small green status pill at the bottom of the card
+                html.Div(id="t1-comment-status", className="mt-2"),
             ])
         ], className="mb-4"),
 
@@ -418,35 +412,28 @@ def t1_load_customers(n_clicks, group_values):
         return no_update, no_update, msg, True
 
 
-# ------------------------- Tab 1: On select athlete (robust) -------------------------
+# ------------------------- Tab 1: On select athlete -------------------------
 @app.callback(
     Output("t1-complaint-dd", "options"),
     Output("t1-complaint-dd", "value"),
     Output("t1-comments-table", "data"),
-    Output("t1-comment-hint", "children"),
+    Output("t1-comment-status", "children"),     # green pill at bottom
     Output("t1-selected-athlete-label", "children"),
     Output("t1-comment-date", "date"),
     Input("t1-athlete-table", "selected_rows"),
-    Input("t1-athlete-table", "active_cell"),
     State("t1-rows-json", "data"),
 )
-def t1_on_select(selected_rows, active_cell, rows_json):
+def t1_on_select(selected_rows, rows_json):
     if not rows_json:
         raise PreventUpdate
 
-    # Determine the clicked/selected row index robustly
-    idx = None
-    if selected_rows:
-        idx = selected_rows[0]
-    elif active_cell and isinstance(active_cell, dict) and active_cell.get("row") is not None:
-        idx = active_cell["row"]
+    today = date.today().strftime("%Y-%m-%d")
 
-    # No selection yet → reset UI with today's date
-    if idx is None or idx < 0 or idx >= len(rows_json):
-        today = date.today().strftime("%Y-%m-%d")
-        return [], None, [], "Select an athlete above; comments will filter to that athlete.", "", today
+    if not selected_rows:
+        # no selection yet
+        return [], None, [], green_badge("Select an athlete above; comments will filter to that athlete."), "", today
 
-    row = rows_json[idx]
+    row = rows_json[selected_rows[0]]
     cid = int(row["_cid"])
     label = row["_athlete_label"]
 
@@ -460,14 +447,13 @@ def t1_on_select(selected_rows, active_cell, rows_json):
     comments = _db_list_comments_with_ids([cid])
     expanded = [_expand_comment_record(rec, label) for rec in comments]
 
-    today = date.today().strftime("%Y-%m-%d")
-
-    return opts, val, expanded, f"Adding comment for: {label}", f" — {label}", today
+    return opts, val, expanded, green_badge(f"Adding comment for: {label}"), f" — {label}", today
 
 
 # ------------------------- Tab 1: Save comment -------------------------
 @app.callback(
     Output("t1-comments-table", "data", allow_duplicate=True),
+    Output("t1-comment-status", "children", allow_duplicate=True),
     State("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
     State("t1-complaint-dd", "value"),
@@ -492,13 +478,13 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
 
     comments = _db_list_comments_with_ids([cid])
     expanded = [_expand_comment_record(rec, label, override_by=by_who, override_complaint=complaint) for rec in comments]
-    return expanded
+
+    return expanded, green_badge("Comment saved.")
 
 
 # ------------------------- Tab 1: Persist edits/deletes -------------------------
 @app.callback(
-    Output("t1-comment-status", "is_open"),
-    Output("t1-comment-status", "children"),
+    Output("t1-comment-status", "children", allow_duplicate=True),  # show updates here in green pill
     Input("t1-comments-table", "data_timestamp"),
     State("t1-comments-table", "data"),
     State("t1-comments-table", "data_previous"),
@@ -507,7 +493,7 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
 def t1_persist_comment_mutations(_ts, data, data_prev):
     """
     Detect row deletes or inline edits and update SQLite accordingly.
-    Shows a small green flag at the bottom-right of the comments card.
+    Only the Comment field is editable; everything else is locked.
     """
     try:
         if data_prev is None:
@@ -531,13 +517,17 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
                 _db_update_comment_text(cid, now.get("Comment") or "")
                 any_edit = True
 
-        if deleted_ids or any_edit:
-            return True, "Comments updated."
+        if deleted_ids and any_edit:
+            return green_badge("Comment(s) edited and deleted.")
+        elif deleted_ids:
+            return green_badge("Comment deleted.")
+        elif any_edit:
+            return green_badge("Comment updated.")
         else:
             raise PreventUpdate
     except Exception as e:
-        # still surface issues through the same green badge but with text
-        return True, f"Comment persistence error: {e}"
+        # still show in the same area, but as plain text (keeps UI simple)
+        return f"Comment persistence error: {e}"
 
 
 # =========================
@@ -577,7 +567,7 @@ def _db_delete_comment(comment_id: int):
 
 def _db_update_comment_text(comment_id: int, new_text: str):
     conn = _db_connect(); cur = conn.cursor()
-    cur.execute("UPDATE comments SET comment = ? WHERE id = ?", (new_text, int(comment_id)))  # <-- WRONG
+    cur.execute("UPDATE comments SET comment = ? WHERE id = ?", (new_text, int(comment_id)))
     conn.commit(); conn.close()
 
 def _expand_comment_record(rec, athlete_label, override_by=None, override_complaint=None):
