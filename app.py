@@ -1,37 +1,42 @@
-# app.py
-import os, math, requests, json
+import os, math, json, requests, sqlite3, traceback
+from datetime import datetime
+
 import pandas as pd
-
 import dash
-import flask
-from dash_auth_external import DashAuthExternal
-from dash.exceptions import PreventUpdate
-from dash import Dash, Input, Output, html, dcc, no_update, dash_table, State, callback_context
 import dash_bootstrap_components as dbc
+from dash import Dash, html, dcc, Input, Output, State, no_update, dash_table, callback_context
 
-from layout import Footer, Navbar  # same as repo
-from settings import *             # expects AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLIENT_SECRET
+from dash_auth_external import DashAuthExternal
 
-# Reuse the data + helpers from your training dashboard module
-from training_dashboard import (
-    layout_body as training_layout_body,
-    register_callbacks as training_register_callbacks,
-    CUSTOMERS, CID_TO_GROUPS, CID_TO_APPTS, GROUP_OPTS,
-    fetch_customer_complaints, PASTEL_COLOR, STATUS_ORDER,
-    db_add_comment, db_list_comments
-)
+# ── Repo-style layout & utilities
+from layout import Footer, Navbar, Pagination, GeographyFilters
+from settings import *  # AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLIENT_SECRET
 
-# ------------------------- Auth / server (repo style) -------------------------
+# ── Import training dashboard bits (we reuse its data + DB helpers)
+import training_dashboard as td
+
+
+# ======================================================================================
+# Auth / Flask server (same style as the repo)
+# ======================================================================================
 auth = DashAuthExternal(
-    AUTH_URL, TOKEN_URL, app_url=APP_URL, client_id=CLIENT_ID, client_secret=CLIENT_SECRET
+    AUTH_URL,
+    TOKEN_URL,
+    app_url=APP_URL,
+    client_id=CLIENT_ID,
+    client_secret=CLIENT_SECRET
 )
 server = auth.server
 
+# Static assets (repo style)
 here = os.path.dirname(os.path.abspath(__file__))
 assets_path = os.path.join(here, "assets")
 server.static_folder = assets_path
 server.static_url_path = "/assets"
 
+# ======================================================================================
+# Dash app
+# ======================================================================================
 app = Dash(
     __name__,
     server=server,
@@ -42,104 +47,85 @@ app = Dash(
     suppress_callback_exceptions=True,
 )
 
-# ------------------------- Small HTML helpers (pills/dots) -------------------------
+# ======================================================================================
+# Small helpers for HTML pills / dots (single-line for HTML rendering)
+# ======================================================================================
 def pill(text: str, bg_hex: str, border="#e3e6eb", fg="#111"):
-    return f"""
-    <span style="
-      display:inline-block;padding:2px 8px;border-radius:999px;
-      background:{bg_hex};color:{fg};border:1px solid {border};
-      font-size:12px; line-height:18px; white-space:nowrap;">
-      {text}
-    </span>
-    """
+    return (
+        f'<span style="display:inline-block;padding:2px 8px;border-radius:999px;'
+        f'background:{bg_hex};color:{fg};border:1px solid {border};'
+        f'font-size:12px;line-height:18px;white-space:nowrap;">{text}</span>'
+    )
 
 def dot(hex_color: str, size=10, mr=8):
-    return f'<span style="display:inline-block;width:{size}px;height:{size}px;border-radius:50%;background:{hex_color};margin-right:{mr}px;border:1px solid rgba(0,0,0,.25)"></span>'
+    return (
+        f'<span style="display:inline-block;width:{size}px;height:{size}px;'
+        f'border-radius:50%;background:{hex_color};margin-right:{mr}px;'
+        f'border:1px solid rgba(0,0,0,.25)"></span>'
+    )
 
-# ------------------------- Tab 1 layout -------------------------
+# Light tag color
+PILL_BG = "#eef2f7"
+
+# ======================================================================================
+# Tab 1 (Overview) layout — group → load → customers table + comments
+# Uses the SAME data already fetched by training_dashboard.py (CUSTOMERS, groups, etc.)
+# ======================================================================================
+
 def tab1_layout():
     return dbc.Container([
-        html.H3("Athlete Overview", className="mt-1"),
+        html.H3("Overview", className="mt-3 mb-2"),
 
         # Group selector + Load
         dbc.Row([
-            dbc.Col(dcc.Dropdown(id="t1-group-dd", options=GROUP_OPTS, multi=True,
-                                 placeholder="Select patient group(s)…"), md=6),
+            dbc.Col(dcc.Dropdown(
+                id="t1-group-dd",
+                options=td.GROUP_OPTS,   # same options as training dashboard
+                multi=True,
+                placeholder="Select patient group(s)…",
+            ), md=6),
             dbc.Col(dbc.Button("Load", id="t1-load", color="primary", className="w-100"), md=2),
-        ], className="g-2"),
-        html.Hr(),
+        ], className="g-2 mb-2"),
 
-        # Athlete table card
-        dbc.Card([
-            dbc.CardHeader("Athletes", className="bg-light"),
-            dbc.CardBody([
-                dash_table.DataTable(
-                    id="t1-athlete-table",
-                    columns=[
-                        {"name":"Athlete","id":"Athlete","presentation":"markdown"},
-                        {"name":"Groups","id":"Groups","presentation":"markdown"},
-                        {"name":"Current Status","id":"CurrentStatus","presentation":"markdown"},
-                        {"name":"Complaints","id":"Complaints","presentation":"markdown"},
-                        {"name":"Latest Onset","id":"LatestOnset"},
-                        {"name":"Priority","id":"Priority"},
-                        {"name":"Complaint Status","id":"ComplaintStatus"},
-                    ],
-                    data=[],
-                    page_size=15,
-                    filter_action="native",
-                    sort_action="native",
-                    markdown_options={"html": True},
-                    style_table={"overflowX":"auto"},
-                    style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","borderBottom":"1px solid #e9ecef"},
-                    style_cell={
-                        "padding":"9px","fontSize":14,
-                        "fontFamily":"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
-                        "textAlign":"left"
-                    },
-                    style_data={"borderBottom":"1px solid #eceff4"},
-                    style_data_conditional=[{"if":{"row_index":"odd"},"backgroundColor":"#fbfbfd"}],
-                    row_selectable="single",
-                    selected_rows=[],
-                )
-            ])
-        ], className="mb-4"),
+        dbc.Alert(id="t1-msg", color="danger", is_open=False, duration=0),
 
-        # Compose comment card
+        # Athletes table
+        html.Div(id="t1-grid-container"),
+
+        # Comment composer
         dbc.Card([
             dbc.CardHeader("Add Comment", className="bg-light"),
             dbc.CardBody([
                 dbc.Row([
+                    dbc.Col(dbc.Input(id="t1-comment-user", placeholder="Signed in user (auto)", disabled=True), md=3),
                     dbc.Col(dcc.DatePickerSingle(id="t1-comment-date", display_format="YYYY-MM-DD"), md=3),
-                    dbc.Col(dcc.Dropdown(id="t1-complaint-dd", placeholder="Pick complaint (optional)…"), md=4),
-                    dbc.Col(dcc.Textarea(
-                        id="t1-comment-text",
-                        placeholder="Write a comment about the selected athlete (auto-fills today if empty)…",
-                        style={"width":"100%","height":"80px"}), md=5),
-                ], className="g-2"),
-                html.Div(id="t1-comment-hint", className="text-muted mt-1", style={"fontSize":"12px"}),
-                dbc.Button("Save Comment", id="t1-save-comment", color="success", className="mt-2"),
+                    dbc.Col(dcc.Dropdown(id="t1-complaint-dd", placeholder="Select complaint…"), md=3),
+                    dbc.Col(dbc.Button("Save Comment", id="t1-save-comment", color="success", className="w-100"), md=3),
+                ], className="g-2 mb-2"),
+                dcc.Textarea(
+                    id="t1-comment-text",
+                    placeholder="Write your note…",
+                    style={"width":"100%","height":"80px"}
+                ),
+                html.Div(id="t1-comment-hint", className="text-muted mt-2", style={"fontSize":"12px"}),
             ])
-        ], className="mb-4"),
+        ], className="mb-3", style={"border":"1px solid #e9ecef","borderRadius":"0.5rem"}),
 
-        # Comment history
+        # Comment history (for the selected athlete)
         dbc.Card([
-            dbc.CardHeader("Comment History (selected athlete)", className="bg-light"),
+            dbc.CardHeader("Comment History", className="bg-light"),
             dbc.CardBody([
                 dash_table.DataTable(
                     id="t1-comments-table",
                     columns=[
-                        {"name":"Date","id":"Date"},
-                        {"name":"By","id":"By"},
-                        {"name":"Athlete","id":"Athlete"},
-                        {"name":"Complaint","id":"Complaint"},
-                        {"name":"Status","id":"Status","presentation":"markdown"},
-                        {"name":"Comment","id":"Comment"},
+                        {"name":"Date", "id":"Date"},
+                        {"name":"Comment", "id":"Comment"},
+                        {"name":"Athlete", "id":"Athlete"},
                     ],
                     data=[],
-                    page_size=10,
-                    filter_action="native",
+                    page_size=8,
                     sort_action="native",
-                    markdown_options={"html": True},
+                    filter_action="native",
                     style_header={"fontWeight":"600","backgroundColor":"#f8f9fa"},
                     style_cell={"padding":"8px","fontSize":13,
                                 "fontFamily":"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
@@ -147,34 +133,46 @@ def tab1_layout():
                     style_data={"whiteSpace":"normal","height":"auto","borderBottom":"1px solid #eee"},
                 )
             ])
-        ], className="mb-5"),
+        ], className="mb-4", style={"border":"1px solid #e9ecef","borderRadius":"0.5rem"}),
 
-        # selected athlete store
+        # Stores
+        dcc.Store(id="t1-rows-json", data=[]),
         dcc.Store(id="t1-selected-athlete", data=None),
-
-        dbc.Alert(id="t1-msg", is_open=False, duration=0, color="danger"),
     ], fluid=True)
 
-# ------------------------- App layout (repo style) -------------------------
+
+# ======================================================================================
+# Page layout: repo-style Navbar + Footer with Tabs
+# ======================================================================================
+
 app.layout = html.Div([
+    # mirrors repo flow (and lets us set navbar “signed in” later)
     dcc.Location(id="redirect-to", refresh=True),
     dcc.Interval(id="init-interval", interval=500, n_intervals=0, max_intervals=1),
+
+    # refresh who’s signed in every 60s
     dcc.Interval(id="user-refresh", interval=60_000, n_intervals=0),
 
-    Navbar([ html.Span(id="navbar-user", className="text-white-50 small", children="") ]).render(),
+    Navbar([
+        html.Span(id="navbar-user", className="text-white-50 small", children="")
+    ]).render(),
 
     dbc.Container([
         dcc.Tabs(id="main-tabs", value="tab1", children=[
-            dcc.Tab(label="Athletes", value="tab1", children=[ tab1_layout() ]),
-            dcc.Tab(label="Training Dashboard", value="tab2", children=[ training_layout_body() ]),
-        ]),
+            dcc.Tab(label="Overview", value="tab1"),
+            dcc.Tab(label="Training Dashboard", value="tab2"),
+        ], persistence=True, persistence_type="session", parent_className="mb-3"),
+
+        html.Div(id="tabs-content")
     ], fluid=True),
 
     Footer().render(),
 ])
 
-# ------------------------- Repo-like “Who am I?” badge -------------------------
-API_ME_URL = f"{SITE_URL}/api/csiauth/me/"
+
+# ======================================================================================
+# Callbacks — shared navbar “who am I?” (repo style)
+# ======================================================================================
 
 @app.callback(
     Output("redirect-to", "href"),
@@ -182,191 +180,284 @@ API_ME_URL = f"{SITE_URL}/api/csiauth/me/"
     Input("init-interval", "n_intervals"),
     Input("user-refresh", "n_intervals"),
 )
-def who_am_i(_n_init, _n_ref):
+def init_and_user_label(_n1, _n2):
+    """On load and every minute, fetch /api/csiauth/me/ with the bearer token to show the user."""
     try:
         token = auth.get_token()
     except Exception:
         token = None
 
     if not token:
-        # On first load with no token, kick to auth (relative path works on Connect)
-        if _n_init == 0:
-            return "login", no_update
-        return no_update, html.A("Sign in", href="login", className="text-white")
+        # If not authenticated yet, push to /login (relative keeps Connect prefix)
+        return "login", "Sign in"
 
+    # Authenticated: fetch user
     try:
         headers = {"Authorization": f"Bearer {token}"}
-        r = requests.get(API_ME_URL, headers=headers, timeout=5)
-        r.raise_for_status()
-        me = r.json() or {}
-        first = (me.get("first_name") or "").strip()
-        last  = (me.get("last_name") or "").strip()
-        name  = f"{first} {last}".strip() or me.get("email","")
-        return no_update, f"Signed in as: {name}"
+        resp = requests.get(f"{SITE_URL}/api/csiauth/me/", headers=headers, timeout=6)
+        if resp.ok:
+            data = resp.json()
+            fn = data.get("first_name") or ""
+            ln = data.get("last_name") or ""
+            lbl = f"Signed in as: {fn} {ln}".strip()
+        else:
+            lbl = "Signed in"
     except Exception:
-        # Token might be stale; show generic label but don’t break app
-        return no_update, html.A("Sign in", href="login", className="text-white")
+        lbl = "Signed in"
 
-# ------------------------- Tab 1 callbacks -------------------------
-@dash.callback(
-    Output("t1-athlete-table", "data"),
-    Output("t1-athlete-table", "selected_rows"),
+    return no_update, lbl
+
+
+# ======================================================================================
+# Tabs content loader
+# ======================================================================================
+@app.callback(
+    Output("tabs-content", "children"),
+    Input("main-tabs", "value")
+)
+def render_tab(tab):
+    if tab == "tab1":
+        return tab1_layout()
+    else:
+        # Tab 2: use the training dashboard’s layout
+        return td.layout_body()
+
+
+# ======================================================================================
+# Tab 1 — callbacks
+# ======================================================================================
+
+# Populate the Overview table after “Load”
+@app.callback(
+    Output("t1-grid-container", "children"),
+    Output("t1-rows-json", "data"),
     Output("t1-msg", "children"),
     Output("t1-msg", "is_open"),
     Input("t1-load", "n_clicks"),
     State("t1-group-dd", "value"),
+    prevent_initial_call=True
+)
+def t1_load_customers(n_clicks, group_values):
+    try:
+        if not group_values:
+            return no_update, no_update, "Select at least one group.", True
+
+        targets = {td._norm(g) for g in group_values}
+
+        # Build rows from the SAME data structs used by training_dashboard
+        rows = []
+        for cid, cust in td.CUSTOMERS.items():
+            cust_groups = set(td.CID_TO_GROUPS.get(cid, []))
+            if not (targets & cust_groups):
+                continue
+
+            name = f"{cust.get('first_name','')} {cust.get('last_name','')}".strip()
+            groups_html = " ".join(pill(g.title(), PILL_BG) for g in sorted(cust_groups)) if cust_groups else "—"
+
+            # Current status (forward fill, reusing td logic/structs)
+            appts = td.CID_TO_APPTS.get(cid, [])
+            status_rows = []
+            for ap in appts:
+                aid = ap.get("id")
+                date_str = td.tidy_date_str(ap.get("date"))
+                dt = pd.to_datetime(date_str, errors="coerce")
+                if pd.isna(dt):
+                    continue
+                eids = td.encounter_ids_for_appt(aid)
+                max_eid = max(eids) if eids else None
+                s = td.extract_training_status(td.fetch_encounter(max_eid)) if max_eid else ""
+                if s:
+                    status_rows.append((dt.normalize(), s))
+
+            current_status = ""
+            if status_rows:
+                df_s = pd.DataFrame(status_rows, columns=["Date", "Status"]).sort_values("Date")
+                df_s = df_s.drop_duplicates("Date", keep="last")
+                full_idx = pd.date_range(start=df_s["Date"].min(),
+                                         end=pd.Timestamp("today").normalize(), freq="D")
+                df_full = pd.DataFrame({"Date": full_idx}).merge(df_s, on="Date", how="left").sort_values("Date")
+                df_full["Status"] = df_full["Status"].ffill()
+                current_status = str(df_full.iloc[-1]["Status"]) if not df_full.empty else ""
+
+            status_color = td.PASTEL_COLOR.get(current_status, "#e6e6e6")
+            status_html = f"{dot(status_color)}{current_status or '—'}" if current_status else "—"
+
+            # Complaints (customer-level merge)
+            complaints = td.fetch_customer_complaints(cid)
+            complaint_names = [c["Title"] for c in complaints if c.get("Title")]
+            complaints_html = " ".join(pill(t, "#e7f0ff", border="#cfe0ff") for t in complaint_names) if complaint_names else "—"
+
+            rows.append({
+                "Athlete": name,
+                "Groups": groups_html,
+                "Current Status": status_html,
+                "Complaints": complaints_html,
+                "DOB": cust.get("dob") or cust.get("birthdate") or "—",
+                "Sex": cust.get("sex") or cust.get("gender") or "—",
+                "_cid": cid,  # hidden id
+            })
+
+        if not rows:
+            return html.Div("No athletes in those groups."), [], "", False
+
+        df = pd.DataFrame(rows)
+
+        table = dash_table.DataTable(
+            id="t1-athlete-table",
+            data=df.to_dict("records"),
+            columns=[
+                {"name":"Athlete", "id":"Athlete"},
+                {"name":"Groups", "id":"Groups", "presentation":"markdown"},
+                {"name":"Current Status", "id":"Current Status", "presentation":"markdown"},
+                {"name":"Complaints", "id":"Complaints", "presentation":"markdown"},
+                {"name":"DOB", "id":"DOB"},
+                {"name":"Sex", "id":"Sex"},
+            ],
+            # Enable built-in filtering/sorting
+            filter_action="native",
+            sort_action="native",
+            page_size=15,
+            style_table={"overflowX":"auto"},
+            style_header={"fontWeight":"600","backgroundColor":"#f8f9fa"},
+            style_cell={"padding":"9px","fontSize":14,
+                        "fontFamily":"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
+                        "textAlign":"left"},
+            style_data={"borderBottom":"1px solid #eceff4"},
+            style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
+            # CRITICAL: render our <span> HTML
+            dangerously_allow_html=True,
+            # selection
+            row_selectable="single",
+            selected_rows=[],
+        )
+
+        return table, df.to_dict("records"), "", False
+
+    except Exception as e:
+        print("t1_load_customers error:", e)
+        traceback.print_exc()
+        return no_update, no_update, "Error loading athletes.", True
+
+
+# Capture selected athlete (from table selection)
+@app.callback(
+    Output("t1-selected-athlete", "data"),
+    Input("t1-athlete-table", "derived_virtual_selected_rows"),
+    State("t1-rows-json", "data"),
     prevent_initial_call=True,
 )
-def t1_load_group(n_clicks, groups):
-    if not groups:
-        return [], [], "Select at least one group.", True
-
-    targets = { (g or "").strip().lower() for g in groups }
-    rows = []
-
-    # Build per-athlete summaries similar to Tab 2 logic (but fast & lightweight)
-    for cid, cust in CUSTOMERS.items():
-        cust_groups = set(CID_TO_GROUPS.get(cid, []))
-        if not (targets & cust_groups):
-            continue
-
-        label = f"{cust.get('first_name','')} {cust.get('last_name','')} (ID {cid})".strip()
-
-        # Current training status (forward-filled lightweight pass)
-        appts = CID_TO_APPTS.get(cid, [])
-        status_rows = []
-        for ap in appts:
-            dt_str = ap.get("date")
-            if isinstance(dt_str, dict): dt_str = dt_str.get("start","")
-            dt = pd.to_datetime((dt_str or "").split("T",1)[0], errors="coerce")
-            if pd.isna(dt): continue
-            # NOTE: we avoid calling encounters on all rows here for speed; last-known
-            # status is approximated by presence, or leave blank. You can uncomment
-            # the detailed status computation if needed.
-            # eids = encounter_ids_for_appt(ap.get("id"))
-            # if eids: s = extract_training_status(fetch_encounter(max(eids)))
-            # else: s = ""
-            s = ""  # keep fast; training tab computes exact value
-            if s: status_rows.append((dt.normalize(), s))
-
-        current_status = ""
-        if status_rows:
-            df_s = pd.DataFrame(status_rows, columns=["Date","Status"]).sort_values("Date").drop_duplicates("Date", keep="last")
-            idx = pd.date_range(start=df_s["Date"].min(), end=pd.Timestamp("today").normalize(), freq="D")
-            df_full = pd.DataFrame({"Date": idx}).merge(df_s, on="Date", how="left").sort_values("Date")
-            df_full["Status"] = df_full["Status"].ffill()
-            current_status = str(df_full.iloc[-1]["Status"]) if not df_full.empty else ""
-
-        # complaints (customer-level merge)
-        comps = fetch_customer_complaints(cid)
-        comp_titles = [c["Title"] for c in comps if c.get("Title")]
-        comp_count = len(comp_titles)
-        latest_onset = ""
-        priority = ""
-        comp_status = ""
-        if comps:
-            try:
-                latest = sorted([c for c in comps if c.get("Onset")], key=lambda x: pd.to_datetime(x["Onset"]), reverse=True)[0]
-            except Exception:
-                latest = comps[0]
-            latest_onset = latest.get("Onset","") or ""
-            priority = latest.get("Priority","") or ""
-            comp_status = latest.get("Status","") or ""
-
-        # pills/dots
-        group_pills = " ".join([pill(g.title(), "#eef2f7") for g in sorted(list(cust_groups))]) or "—"
-        status_chip = (dot(PASTEL_COLOR.get(current_status, "#e6e6e6")) + (current_status or "—"))
-        complaint_pill = pill(f"{comp_count} issues", "#ffe8e0") if comp_count else "—"
-
-        rows.append({
-            "Athlete": label,
-            "Groups": group_pills,
-            "CurrentStatus": status_chip,
-            "Complaints": complaint_pill,
-            "LatestOnset": latest_onset,
-            "Priority": priority or "—",
-            "ComplaintStatus": comp_status or "—",
-            "_cid": cid,  # keep id hidden for selection
-            "_complaint_titles": comp_titles,
-        })
-
-    # Sort by athlete name
-    rows.sort(key=lambda r: r["Athlete"].lower())
-    return rows, [], "", False
-
-@dash.callback(
-    Output("t1-selected-athlete", "data"),
-    Output("t1-complaint-dd", "options"),
-    Output("t1-comment-hint", "children"),
-    Input("t1-athlete-table", "selected_rows"),
-    State("t1-athlete-table", "data"),
-)
-def t1_select_athlete(selected_rows, table_data):
-    if not table_data or not selected_rows:
-        return None, [], "Select an athlete in the table above to add a comment."
+def t1_select_athlete(selected_rows, all_rows):
+    if not selected_rows:
+        return no_update
     idx = selected_rows[0]
-    rec = table_data[idx]
-    cid = rec.get("_cid")
-    label = rec.get("Athlete","")
-    # complaint list for dropdown (optional)
-    comp_titles = rec.get("_complaint_titles") or []
-    opts = [{"label": t, "value": t} for t in sorted(set(comp_titles))]
-    hint = f"Commenting on: {label}"
-    return {"id": cid, "label": label}, opts, hint
+    try:
+        cid = all_rows[idx]["_cid"]
+        return int(cid)
+    except Exception:
+        return no_update
 
-@dash.callback(
-    Output("t1-comments-table", "data"),
+
+# When athlete changes → populate complaints dropdown + hint + user field + today date
+@app.callback(
+    Output("t1-complaint-dd", "options"),
+    Output("t1-complaint-dd", "value"),
+    Output("t1-comment-hint", "children"),
+    Output("t1-comment-user", "value"),
+    Output("t1-comment-date", "date"),
     Input("t1-selected-athlete", "data"),
+    Input("user-refresh", "n_intervals"),  # also refresh who is signed in text
+    prevent_initial_call=True,
 )
-def t1_refresh_comments(sel):
-    if not sel or not sel.get("id"):
-        return []
-    cid = int(sel["id"])
-    # map to columns needed on Tab 1
-    rows = db_list_comments([cid])
-    # Add simple “By” (we don’t store user in DB, so display placeholder or use auth info if desired)
-    out = [{
-        "Date": r["Date"],
-        "By": "",  # if you want, fetch /api/csiauth/me/ in save step and persist
-        "Athlete": r["Athlete"],
-        "Complaint": "",   # stored free-form below if you extend DB schema
-        "Status": "",      # likewise (or compute current status on-the-fly)
-        "Comment": r["Comment"]
-    } for r in rows]
-    return out
+def t1_update_comment_controls(cid, _n_user):
+    if not cid:
+        return [], None, "Select an athlete in the table above.", "", no_update
 
-@dash.callback(
-    Output("t1-comments-table", "data", allow_duplicate=True),
+    # Complaints for this athlete
+    complaints = td.fetch_customer_complaints(int(cid))
+    opts = [{"label": c["Title"], "value": c["Title"]} for c in complaints if c.get("Title")]
+    value = opts[0]["value"] if opts else None
+
+    # Who am I?
+    try:
+        token = auth.get_token()
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        resp = requests.get(f"{SITE_URL}/api/csiauth/me/", headers=headers, timeout=6)
+        if resp.ok:
+            me = resp.json()
+            user_label = f"{me.get('first_name','')} {me.get('last_name','')}".strip()
+        else:
+            user_label = ""
+    except Exception:
+        user_label = ""
+
+    today = pd.Timestamp("today").strftime("%Y-%m-%d")
+    return opts, value, f"Adding comment for athlete ID {cid}.", user_label, today
+
+
+# Save comment → DB + refresh history
+@app.callback(
+    Output("t1-comments-table", "data"),
     State("t1-selected-athlete", "data"),
+    State("t1-rows-json", "data"),
     State("t1-comment-date", "date"),
     State("t1-comment-text", "value"),
     State("t1-complaint-dd", "value"),
+    State("t1-comment-user", "value"),
     Input("t1-save-comment", "n_clicks"),
     prevent_initial_call=True,
 )
-def t1_save_comment(sel, date_str, text, complaint_value, _n):
-    if not sel or not sel.get("id"): return no_update
-    if not (text or "").strip(): return no_update
-    if not date_str:
-        date_str = pd.Timestamp("today").strftime("%Y-%m-%d")
+def t1_save_comment(cid, all_rows, date_str, text, complaint, user_label, _n):
+    if not cid or not date_str or not (text or "").strip():
+        # nothing to do
+        if cid:
+            return td.db_list_comments([int(cid)])
+        return []
 
-    cid   = int(sel["id"])
-    label = sel.get("label", f"ID {cid}")
-    # Persist comment; if you want to store complaint/status/author, extend the table schema here
-    db_add_comment(cid, label, date_str, text.strip())
+    # build a richer comment string with complaint & author
+    text_clean = text.strip()
+    parts = []
+    if complaint:
+        parts.append(f"[Complaint: {complaint}]")
+    if user_label:
+        parts.append(f"[By: {user_label}]")
+    parts.append(text_clean)
+    final_comment = " ".join(parts)
 
-    # Refresh table
-    rows = db_list_comments([cid])
-    out = [{
-        "Date": r["Date"], "By": "", "Athlete": r["Athlete"],
-        "Complaint": complaint_value or "", "Status": "",
-        "Comment": r["Comment"]
-    } for r in rows]
-    return out
+    # Find label for the athlete
+    label = None
+    for r in (all_rows or []):
+        if int(r.get("_cid")) == int(cid):
+            label = r.get("Athlete")
+            break
+    if not label:
+        # fallback from training dashboard customer dictionary
+        c = td.CUSTOMERS.get(int(cid), {})
+        label = f"{c.get('first_name','')} {c.get('last_name','')} (ID {cid})".strip()
 
-# ------------------------- Training tab callbacks -------------------------
-training_register_callbacks(app)
+    td.db_add_comment(int(cid), label, date_str, final_comment)
+    return td.db_list_comments([int(cid)])
 
-# ------------------------- Run -------------------------
+
+# When athlete changes → refresh the history table
+@app.callback(
+    Output("t1-comments-table", "data", allow_duplicate=True),
+    Input("t1-selected-athlete", "data"),
+    prevent_initial_call=True
+)
+def t1_refresh_history_on_select(cid):
+    if not cid:
+        return []
+    return td.db_list_comments([int(cid)])
+
+
+# ======================================================================================
+# Register Tab 2 callbacks from training_dashboard
+# ======================================================================================
+td.register_callbacks(app)
+
+
+# ======================================================================================
+# Run
+# ======================================================================================
 if __name__ == "__main__":
     app.run(debug=False, port=8050)
