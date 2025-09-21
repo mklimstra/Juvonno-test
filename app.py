@@ -12,15 +12,15 @@ from dash.exceptions import PreventUpdate
 from dash import Dash, Input, Output, html, dcc, no_update, dash_table, State, callback_context
 import dash_bootstrap_components as dbc
 
-# stdlib HTML escape (fixes the error you saw)
+# stdlib HTML escape
 from html import escape as html_escape
 
 # Repo components & settings (same import style as the registration viewer)
 from layout import Footer, Navbar
 from settings import *  # expects AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLIENT_SECRET
 
-# Reuse all API/data utilities from the working Training Dashboard
-import training_dashboard as td  # uses JUV_API_KEY env var, fetches CUSTOMERS, GROUP_OPTS, etc.
+# Reuse the working Training Dashboard module
+import training_dashboard as td  # uses JUV_API_KEY env var
 
 
 # ------------------------- Auth / Server -------------------------
@@ -143,7 +143,6 @@ def tab1_layout():
 
 # ------------------------- Tab 2 (Training Dashboard) Layout -------------------------
 def tab2_layout():
-    # Use the same layout/callbacks you already have working
     return td.layout_body()
 
 
@@ -309,12 +308,12 @@ def t1_load_customers(n_clicks, group_values):
         if not rows:
             return html.Div("No athletes in those groups."), [], "", False
 
-        # DataTable with filtering/sorting enabled; render pills/dots via dangerously_allow_html
+        # DataTable with filtering/sorting enabled; render pills/dots via Markdown+HTML
         columns = [
             {"name":"Athlete", "id":"Athlete"},
-            {"name":"Groups", "id":"Groups"},
-            {"name":"Current Status", "id":"Current Status"},
-            {"name":"Complaints", "id":"Complaints"},
+            {"name":"Groups", "id":"Groups", "presentation":"markdown"},
+            {"name":"Current Status", "id":"Current Status", "presentation":"markdown"},
+            {"name":"Complaints", "id":"Complaints", "presentation":"markdown"},
             {"name":"DOB", "id":"DOB"},
             {"name":"Sex", "id":"Sex"},
         ]
@@ -322,6 +321,7 @@ def t1_load_customers(n_clicks, group_values):
             id="t1-athlete-table",
             data=rows,
             columns=columns,
+            markdown_options={"html": True},
             filter_action="native",
             sort_action="native",
             page_size=15,
@@ -332,7 +332,6 @@ def t1_load_customers(n_clicks, group_values):
                         "textAlign":"left"},
             style_data={"borderBottom":"1px solid #eceff4"},
             style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
-            dangerously_allow_html=True,
             row_selectable="single",
             selected_rows=[],
         )
