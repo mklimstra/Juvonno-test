@@ -2,6 +2,7 @@
 import os
 import math
 import json
+import hashlib
 import requests
 import pandas as pd
 import dash
@@ -12,15 +13,14 @@ from dash.exceptions import PreventUpdate
 from dash import Dash, Input, Output, html, dcc, no_update, dash_table, State, callback_context
 import dash_bootstrap_components as dbc
 
-# stdlib HTML escape
 from html import escape as html_escape
 
-# Repo components & settings (same import style as the registration viewer)
+# Repo components & settings
 from layout import Footer, Navbar
-from settings import *  # expects AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLIENT_SECRET
+from settings import *  # AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLIENT_SECRET
 
-# Reuse the working Training Dashboard module
-import training_dashboard as td  # uses JUV_API_KEY env var
+# Training tab (unchanged logic & JUV API calls)
+import training_dashboard as td
 
 
 # ------------------------- Auth / Server -------------------------
@@ -33,7 +33,7 @@ auth = DashAuthExternal(
 )
 server = auth.server
 
-# Serve assets folder like the repo
+# Serve assets (same as repo)
 here = os.path.dirname(os.path.abspath(__file__))
 assets_path = os.path.join(here, "assets")
 server.static_folder = assets_path
@@ -52,10 +52,31 @@ app = Dash(
 )
 
 
-# ------------------------- Small HTML helpers (pills/dots) -------------------------
-PILL_BG = "#eef2f7"
+# ------------------------- Small helpers (pills/dots/colors) -------------------------
+PILL_BG_DEFAULT = "#eef2f7"
 
-def pill(text: str, bg=PILL_BG, fg="#111", border="#e3e6eb"):
+# nice, soft pastel palette; stable selection via md5(text) % len(PALETTE)
+PALETTE = [
+    "#e7f0ff",  # blue-ish
+    "#fde2cf",  # peach
+    "#e6f3e6",  # green-ish
+    "#f3e6f7",  # purple-ish
+    "#fff3cd",  # soft yellow
+    "#e0f7fa",  # cyan-ish
+    "#fbe7eb",  # pink-ish
+    "#e7f5ff",  # light blue
+]
+BORDER = "#cfd6de"
+
+def color_for_label(text: str) -> str:
+    if not text:
+        return PILL_BG_DEFAULT
+    h = hashlib.md5(text.encode("utf-8")).hexdigest()
+    idx = int(h[:8], 16) % len(PALETTE)
+    return PALETTE[idx]
+
+def pill(text: str, bg=None, fg="#111", border=BORDER):
+    bg = bg or PILL_BG_DEFAULT
     return (
         f'<span style="display:inline-block;padding:2px 8px;'
         f'border-radius:999px;background:{bg};color:{fg};'
@@ -79,7 +100,7 @@ def tab1_layout():
         dbc.Row([
             dbc.Col(dcc.Dropdown(
                 id="t1-group-dd",
-                options=td.GROUP_OPTS,  # reuse computed groups from training_dashboard
+                options=td.GROUP_OPTS,  # reuse groups computed in training_dashboard
                 multi=True,
                 placeholder="Select patient group(s)…"
             ), md=6),
@@ -148,7 +169,6 @@ def tab2_layout():
 
 # ------------------------- Page Layout -------------------------
 app.layout = html.Div([
-    # repo boot sequence
     dcc.Location(id="redirect-to", refresh=True),
 
     # one-time init for login / redirect
@@ -157,7 +177,7 @@ app.layout = html.Div([
     # user badge refresh (signed-in name) every 60s
     dcc.Interval(id="user-refresh", interval=60_000, n_intervals=0),
 
-    # Navbar with right-slot for user label (same component as repo)
+    # Navbar with right-slot for user label
     Navbar([
         html.Span(id="navbar-user", className="text-white-50 small", children="")
     ]).render(),
@@ -184,27 +204,33 @@ app.layout = html.Div([
     Input("main-tabs", "value"),
 )
 def render_tab(which):
-    if which == "tab-1":
-        return tab1_layout()
-    else:
-        return tab2_layout()
+    return tab1_layout() if which == "tab-1" else tab2_layout()
 
 
 # ------------------------- Auth / Navbar user -------------------------
 @app.callback(
     Output("redirect-to", "href"),
-    Input("init-interval", "n_intervals")
+    Input("init-interval", "n_intervals"),
+    State("redirect-to", "pathname"),
 )
-def initial_view(n):
-    """Redirect to /login if we don't have a token yet (same behavior as repo)."""
+def initial_view(n, pathname):
+    """
+    Redirect to /login only when no token AND we are not already on /login.
+    This prevents the reload loop on the /login page.
+    """
     try:
         token = auth.get_token()
     except Exception:
         token = None
 
-    if not token:
-        return "login"  # relative path works on Posit Connect under /content/<id>
-    return no_update
+    if token:
+        return no_update
+
+    # Already at /login? do nothing.
+    if (pathname or "").rstrip("/") == "/login":
+        return no_update
+
+    return "login"  # relative path works on Posit Connect under /content/<id>
 
 
 @app.callback(
@@ -212,7 +238,7 @@ def initial_view(n):
     Input("user-refresh", "n_intervals"),
 )
 def refresh_user_badge(_n):
-    """Show 'Signed in as: First Last' once token is present."""
+    """Show 'Signed in as: First Last' once token is present; otherwise show 'Sign in'."""
     try:
         token = auth.get_token()
         if not token:
@@ -245,10 +271,8 @@ def t1_load_customers(n_clicks, group_values):
         if not group_values:
             return no_update, no_update, "Select at least one group.", True
 
-        # Normalize targets (use the same lowercasing as training_dashboard)
         targets = {td._norm(g) for g in group_values}
 
-        # Build rows from the same data that tab 2 uses
         rows = []
         for cid, cust in td.CUSTOMERS.items():
             cust_groups = set(td.CID_TO_GROUPS.get(cid, []))
@@ -256,11 +280,13 @@ def t1_load_customers(n_clicks, group_values):
                 continue
 
             name = f"{cust.get('first_name','')} {cust.get('last_name','')}".strip()
+
+            # colorful pills per group
             groups_html = " ".join(
-                pill(g.title(), PILL_BG) for g in sorted(cust_groups)
+                pill(g.title(), color_for_label(g)) for g in sorted(cust_groups)
             ) if cust_groups else "—"
 
-            # Current status (forward-fill from appointments)
+            # Current training status (forward-fill)
             appts = td.CID_TO_APPTS.get(cid, [])
             status_rows = []
             for ap in appts:
@@ -288,11 +314,11 @@ def t1_load_customers(n_clicks, group_values):
             status_color = td.PASTEL_COLOR.get(current_status, "#e6e6e6")
             status_html = f"{dot(status_color)}{html_escape(current_status) if current_status else '—'}" if current_status else "—"
 
-            # Complaints (from merged sources)
+            # Complaints pills (also colorful)
             complaints = td.fetch_customer_complaints(cid)
             complaint_names = [c["Title"] for c in complaints if c.get("Title")]
             complaints_html = " ".join(
-                pill(t, "#e7f0ff", border="#cfe0ff") for t in complaint_names
+                pill(t, color_for_label(t), border=BORDER) for t in complaint_names
             ) if complaint_names else "—"
 
             rows.append({
@@ -308,7 +334,6 @@ def t1_load_customers(n_clicks, group_values):
         if not rows:
             return html.Div("No athletes in those groups."), [], "", False
 
-        # DataTable with filtering/sorting enabled; render pills/dots via Markdown+HTML
         columns = [
             {"name":"Athlete", "id":"Athlete"},
             {"name":"Groups", "id":"Groups", "presentation":"markdown"},
@@ -317,12 +342,22 @@ def t1_load_customers(n_clicks, group_values):
             {"name":"DOB", "id":"DOB"},
             {"name":"Sex", "id":"Sex"},
         ]
+
         table = dash_table.DataTable(
             id="t1-athlete-table",
             data=rows,
             columns=columns,
             markdown_options={"html": True},
+            # Filtering: case-insensitive + styled filter row
             filter_action="native",
+            filter_options={"case": "insensitive"},
+            style_filter={
+                "backgroundColor": "#fafcff",
+                "borderBottom": "1px solid #e6ebf1",
+                "borderTop": "1px solid #e6ebf1",
+                "fontStyle": "italic",
+            },
+            # Sorting + paging
             sort_action="native",
             page_size=15,
             style_table={"overflowX":"auto"},
@@ -348,7 +383,6 @@ def t1_load_customers(n_clicks, group_values):
         return no_update, no_update, msg, True
 
 
-# When a row is selected, populate the complaint dropdown and comments table
 @app.callback(
     Output("t1-complaint-dd", "options"),
     Output("t1-complaint-dd", "value"),
@@ -366,29 +400,26 @@ def t1_on_select(selected_rows, rows_json):
     row = rows_json[selected_rows[0]]
     cid = int(row["_cid"])
 
-    # complaint options
     complaints = td.fetch_customer_complaints(cid)
     names = [c["Title"] for c in complaints if c.get("Title")]
     opts = [{"label": n, "value": n} for n in sorted(set(names))]
     val = opts[0]["value"] if opts else None
 
-    # comments table for this athlete (from SQLite)
+    # existing comments for this athlete (from SQLite)
     comments_raw = td.db_list_comments([cid])
     expanded = []
     for c in comments_raw:
         expanded.append({
             "Date": c["Date"],
-            "By": "",  # we’ll fill in on save with user name
+            "By": "",  # will fill on save if available
             "Athlete": row["Athlete"],
-            "Complaint": "",  # we’ll fill on save if provided
-            "Status": "",     # optional to fill on save
+            "Complaint": "",  # will fill on save if provided
+            "Status": "",
             "Comment": c["Comment"],
         })
-
     return opts, val, expanded, f"Adding comment for: {row['Athlete']}"
 
 
-# Save a Tab 1 comment and refresh the table
 @app.callback(
     Output("t1-comments-table", "data", allow_duplicate=True),
     State("t1-athlete-table", "selected_rows"),
@@ -400,21 +431,17 @@ def t1_on_select(selected_rows, rows_json):
     prevent_initial_call=True,
 )
 def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
-    if not _n:
-        raise PreventUpdate
-    if not rows_json or not selected_rows:
-        raise PreventUpdate
-    if not date_str or not (text or "").strip():
+    if not _n or not rows_json or not selected_rows or not date_str or not (text or "").strip():
         raise PreventUpdate
 
     row = rows_json[selected_rows[0]]
     cid = int(row["_cid"])
     label = row["Athlete"]
 
-    # Persist to SQLite (same DB used by tab 2)
+    # Persist to SQLite (same DB used by training tab)
     td.db_add_comment(cid, label, date_str, text.strip())
 
-    # Rebuild comments display for this athlete (include author name if available)
+    # Build "By" from /me
     by_who = ""
     try:
         token = auth.get_token()
@@ -435,18 +462,16 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
             "By": by_who if by_who else "",
             "Athlete": label,
             "Complaint": complaint or "",
-            "Status": "",  # optional: derive current status if you want
+            "Status": "",
             "Comment": c["Comment"],
         })
-
     return expanded
 
 
-# ------------------------- Register Tab 2 callbacks -------------------------
+# ------------------------- Register Training tab callbacks -------------------------
 td.register_callbacks(app)
 
 
 # ------------------------- Main -------------------------
 if __name__ == "__main__":
-    # Local run; on Connect the launcher takes over
     app.run(debug=False, port=8050)
