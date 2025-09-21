@@ -1,5 +1,7 @@
 # app.py
 import os
+import math
+import json
 import hashlib
 import sqlite3
 from datetime import date
@@ -10,7 +12,7 @@ import traceback
 
 from dash_auth_external import DashAuthExternal
 from dash.exceptions import PreventUpdate
-from dash import Dash, Input, Output, html, dcc, no_update, dash_table, State
+from dash import Dash, Input, Output, html, dcc, no_update, dash_table, State, callback_context
 import dash_bootstrap_components as dbc
 
 from html import escape as html_escape
@@ -42,7 +44,18 @@ server.static_url_path = "/assets"
 
 # ------------------------- Small helpers (pills/dots/colors) -------------------------
 PILL_BG_DEFAULT = "#eef2f7"
-PALETTE = ["#e7f0ff","#fde2cf","#e6f3e6","#f3e6f7","#fff3cd","#e0f7fa","#fbe7eb","#e7f5ff"]
+
+# soft pastel palette; stable selection via md5(text) % len(PALETTE)
+PALETTE = [
+    "#e7f0ff",  # blue-ish
+    "#fde2cf",  # peach
+    "#e6f3e6",  # green-ish
+    "#f3e6f7",  # purple-ish
+    "#fff3cd",  # soft yellow
+    "#e0f7fa",  # cyan-ish
+    "#fbe7eb",  # pink-ish
+    "#e7f5ff",  # light blue
+]
 BORDER = "#cfd6de"
 
 def color_for_label(text: str) -> str:
@@ -68,16 +81,26 @@ def dot(hex_color: str, size: int = 10, mr: int = 8) -> str:
         f'border:1px solid rgba(0,0,0,.25)"></span>'
     )
 
-def green_badge_component(msg: str):
-    # Return a Dash component (not a string) so it actually renders as styled UI
-    return html.Span(
-        msg or "",
-        style={
-            "display":"inline-block","padding":"2px 8px","borderRadius":"999px",
-            "background":"#e9f7ef","color":"#0f5132","border":"1px solid #badbcc",
-            "fontSize":"12px","lineHeight":"18px","whiteSpace":"nowrap"
-        }
+# Small green status badge html
+def status_badge(text: str) -> str:
+    if not text:
+        return ""
+    return (
+        '<span style="display:inline-block;padding:2px 8px;border-radius:999px;'
+        'background:#e9f7ef;color:#0f5132;border:1px solid #badbcc;'
+        'font-size:12px;line-height:18px;white-space:nowrap;">'
+        f'{html_escape(text)}</span>'
     )
+
+
+# ------------------------- Ensure SQLite table exists (first-run fix) -------------------------
+def _ensure_comments_table():
+    """
+    Guarantees the comments table exists even before the first saved comment.
+    Uses training_dashboard._db() which creates the table if needed.
+    """
+    conn = td._db()
+    conn.close()
 
 
 # ------------------------- Tab 1 (Overview) Layout -------------------------
@@ -111,8 +134,14 @@ def tab1_layout():
             ]),
             dbc.CardBody([
                 dbc.Row([
-                    dbc.Col(dcc.DatePickerSingle(id="t1-comment-date", display_format="YYYY-MM-DD"), md=3),
-                    dbc.Col(dcc.Dropdown(id="t1-complaint-dd", placeholder="Pick a complaint (optional)…"), md=4),
+                    dbc.Col(dcc.DatePickerSingle(
+                        id="t1-comment-date",
+                        display_format="YYYY-MM-DD"
+                    ), md=3),
+                    dbc.Col(dcc.Dropdown(
+                        id="t1-complaint-dd",
+                        placeholder="Pick a complaint (optional)…"
+                    ), md=4),
                     dbc.Col(dcc.Textarea(
                         id="t1-comment-text",
                         placeholder="Add a note about the selected athlete…",
@@ -123,22 +152,23 @@ def tab1_layout():
                     dbc.Col(dbc.Button("Save Comment", id="t1-save-comment", color="success"), width="auto"),
                 ], className="g-2 mt-2"),
 
-                html.Hr(),
+                html.Hr(className="mt-3 mb-2"),
 
                 dash_table.DataTable(
                     id="t1-comments-table",
                     columns=[
-                        {"name":"Date","id":"Date", "editable": False},
-                        {"name":"By","id":"By", "editable": False},
-                        {"name":"Athlete","id":"Athlete", "editable": False},
-                        {"name":"Complaint","id":"Complaint", "editable": False},
-                        {"name":"Status","id":"Status", "editable": False},
-                        {"name":"Comment","id":"Comment", "editable": True},   # only this is editable
-                        {"name":"_id","id":"_id", "hidden": True, "editable": False},
+                        {"name":"Date","id":"Date"},
+                        {"name":"By","id":"By"},
+                        {"name":"Athlete","id":"Athlete"},
+                        {"name":"Complaint","id":"Complaint"},
+                        {"name":"Status","id":"Status"},
+                        {"name":"Comment","id":"Comment", "editable": True},  # only this is editable
+                        # Hidden technical id used for edit/delete
+                        {"name":"_id","id":"_id", "hidden": True},
                     ],
                     data=[],
                     row_deletable=True,               # delete icon per row
-                    editable=True,                    # table-level enabled; per-column flags above
+                    editable=False,                   # table-level false; only "Comment" editable
                     page_action="none",               # we use scroll, not pagination
                     style_table={
                         "overflowX": "auto",
@@ -151,17 +181,10 @@ def tab1_layout():
                                 "fontFamily":"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
                                 "textAlign":"left"},
                     style_data={"borderBottom":"1px solid #eceff4"},
-                    style_data_conditional=[
-                        {"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"},
-                    ],
-                    # Light red background for the delete control column (CSS hook)
-                    css=[{
-                        "selector": ".dash-table-container .dash-spreadsheet-container .dash-spreadsheet .dash-delete-cell",
-                        "rule": "background-color:#fff5f5;"
-                    }],
+                    style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
                 ),
 
-                # Small green status pill at the bottom of the card
+                # Compact green status badge sits at the bottom of the card
                 html.Div(id="t1-comment-status", className="mt-2"),
             ])
         ], className="mb-4"),
@@ -184,6 +207,9 @@ app = Dash(
     ],
     suppress_callback_exceptions=True,
 )
+
+# Ensure DB exists on startup (first-run fix)
+_ensure_comments_table()
 
 app.layout = html.Div([
     dcc.Location(id="redirect-to", refresh=True),
@@ -298,7 +324,10 @@ def t1_load_customers(n_clicks, group_values):
             first = (cust.get("first_name") or "").strip()
             last  = (cust.get("last_name") or "").strip()
 
-            groups_html = " ".join(pill(g.title(), color_for_label(g)) for g in sorted(cust_groups)) if cust_groups else "—"
+            # colorful pills per group
+            groups_html = " ".join(
+                pill(g.title(), color_for_label(g)) for g in sorted(cust_groups)
+            ) if cust_groups else "—"
 
             # Current training status (forward-fill)
             appts = td.CID_TO_APPTS.get(cid, [])
@@ -327,12 +356,11 @@ def t1_load_customers(n_clicks, group_values):
             status_html = f"{dot(status_color)}{html_escape(current_status) if current_status else '—'}" if current_status else "—"
 
             # Complaints pills
-            try:
-                complaints = td.fetch_customer_complaints(cid)
-                complaint_names = [c["Title"] for c in complaints if c.get("Title")]
-            except Exception:
-                complaint_names = []
-            complaints_html = " ".join(pill(t, color_for_label(t), border=BORDER) for t in complaint_names) if complaint_names else "—"
+            complaints = td.fetch_customer_complaints(cid)
+            complaint_names = [c["Title"] for c in complaints if c.get("Title")]
+            complaints_html = " ".join(
+                pill(t, color_for_label(t), border=BORDER) for t in complaint_names
+            ) if complaint_names else "—"
 
             rows.append({
                 "First Name": first,
@@ -359,11 +387,13 @@ def t1_load_customers(n_clicks, group_values):
             {"name":"Sex", "id":"Sex"},
         ]
 
+        # ~5 visible rows with scroll, consistent spacing
         table = dash_table.DataTable(
             id="t1-athlete-table",
             data=rows,
             columns=columns,
             markdown_options={"html": True},
+            # Filtering: case-insensitive + styled filter row
             filter_action="native",
             filter_options={"case": "insensitive"},
             style_filter={
@@ -372,7 +402,9 @@ def t1_load_customers(n_clicks, group_values):
                 "borderTop": "1px solid #e6ebf1",
                 "fontStyle": "italic",
             },
+            # Sorting
             sort_action="native",
+            # Scroll container to ~5 rows
             page_action="none",
             style_table={"overflowX":"auto", "maxHeight":"240px", "overflowY":"auto"},
             style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","lineHeight":"22px"},
@@ -397,57 +429,45 @@ def t1_load_customers(n_clicks, group_values):
         return no_update, no_update, msg, True
 
 
-# ------------------------- Tab 1: On select athlete (now listens to active_cell too) -------------------------
+# ------------------------- Tab 1: On select athlete -------------------------
 @app.callback(
     Output("t1-complaint-dd", "options"),
     Output("t1-complaint-dd", "value"),
     Output("t1-comments-table", "data"),
-    Output("t1-comment-status", "children"),     # green pill at bottom
     Output("t1-selected-athlete-label", "children"),
     Output("t1-comment-date", "date"),
+    Output("t1-comment-status", "children"),
     Input("t1-athlete-table", "selected_rows"),
-    Input("t1-athlete-table", "active_cell"),
     State("t1-rows-json", "data"),
 )
-def t1_on_select(selected_rows, active_cell, rows_json):
+def t1_on_select(selected_rows, rows_json):
+    _ensure_comments_table()  # first-run safety
+    if not rows_json:
+        raise PreventUpdate
+
+    # Default "today" for the date picker
     today = date.today().strftime("%Y-%m-%d")
 
-    try:
-        if not rows_json:
-            return [], None, [], green_badge_component("Select an athlete above; comments will filter to that athlete."), "", today
+    if not selected_rows:
+        # Clear complaints & table; clear status; clear header label
+        return [], None, [], "", today, ""
 
-        # Prefer selected_rows; fall back to active_cell.row
-        row_index = None
-        if selected_rows:
-            row_index = selected_rows[0]
-        elif active_cell and isinstance(active_cell, dict) and "row" in active_cell:
-            row_index = active_cell.get("row")
+    row = rows_json[selected_rows[0]]
+    cid = int(row["_cid"])
+    label = row["_athlete_label"]
 
-        if row_index is None or not isinstance(row_index, int) or row_index < 0 or row_index >= len(rows_json):
-            return [], None, [], green_badge_component("Select an athlete above; comments will filter to that athlete."), "", today
+    # complaint options for dropdown
+    complaints = td.fetch_customer_complaints(cid)
+    names = [c["Title"] for c in complaints if c.get("Title")]
+    opts = [{"label": n, "value": n} for n in sorted(set(names))]
+    val = opts[0]["value"] if opts else None
 
-        row = rows_json[row_index]
-        cid = int(row.get("_cid"))
-        label = row.get("_athlete_label") or f"ID {cid}"
+    # existing comments for this athlete (with ids)
+    comments = _db_list_comments_with_ids([cid])
+    expanded = [_expand_comment_record(rec, label) for rec in comments]
 
-        # complaint options for dropdown (defensive against API hiccups)
-        try:
-            complaints = td.fetch_customer_complaints(cid)
-            names = [c.get("Title") for c in complaints if isinstance(c, dict) and c.get("Title")]
-        except Exception:
-            names = []
-        names = [n for n in names if isinstance(n, str) and n.strip()]
-        opts = [{"label": n, "value": n} for n in sorted(set(names))]
-        val = opts[0]["value"] if opts else None
-
-        # existing comments for this athlete (with ids)
-        comments = _db_list_comments_with_ids([cid])
-        expanded = [_expand_comment_record(rec, label) for rec in comments]
-
-        return opts, val, expanded, green_badge_component(f"Adding comment for: {label}"), f" — {label}", today
-
-    except Exception as e:
-        return [], None, [], green_badge_component(f"Selection error: {e}"), "", today
+    # Clear status badge on fresh selection
+    return opts, val, expanded, f" — {label}", today, ""
 
 
 # ------------------------- Tab 1: Save comment -------------------------
@@ -455,7 +475,6 @@ def t1_on_select(selected_rows, active_cell, rows_json):
     Output("t1-comments-table", "data", allow_duplicate=True),
     Output("t1-comment-status", "children", allow_duplicate=True),
     State("t1-athlete-table", "selected_rows"),
-    State("t1-athlete-table", "active_cell"),
     State("t1-rows-json", "data"),
     State("t1-complaint-dd", "value"),
     State("t1-comment-date", "date"),
@@ -463,41 +482,29 @@ def t1_on_select(selected_rows, active_cell, rows_json):
     Input("t1-save-comment", "n_clicks"),
     prevent_initial_call=True,
 )
-def t1_save_comment(selected_rows, active_cell, rows_json, complaint, date_str, text, _n):
-    if not _n or not rows_json or not date_str or not (text or "").strip():
+def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
+    _ensure_comments_table()
+    if not _n or not rows_json or not selected_rows or not date_str or not (text or "").strip():
         raise PreventUpdate
 
-    # Determine selected row robustly
-    idx = None
-    if selected_rows:
-        idx = selected_rows[0]
-    elif active_cell and isinstance(active_cell, dict) and "row" in active_cell:
-        idx = active_cell.get("row")
-    if idx is None or idx < 0 or idx >= len(rows_json):
-        raise PreventUpdate
+    row = rows_json[selected_rows[0]]
+    cid = int(row["_cid"])
+    label = row["_athlete_label"]
 
-    try:
-        row = rows_json[idx]
-        cid = int(row["_cid"])
-        label = row["_athlete_label"]
+    # Persist to SQLite (same DB used by training tab)
+    td.db_add_comment(cid, label, date_str, text.strip())
 
-        # Persist to SQLite (same DB used by training tab)
-        td.db_add_comment(cid, label, date_str, text.strip())
+    # User display (By:)
+    by_who = _get_signed_in_name()
 
-        # User display (By:)
-        by_who = _get_signed_in_name()
-
-        comments = _db_list_comments_with_ids([cid])
-        expanded = [_expand_comment_record(rec, label, override_by=by_who, override_complaint=complaint) for rec in comments]
-
-        return expanded, green_badge_component("Comment saved.")
-    except Exception as e:
-        return no_update, green_badge_component(f"Save error: {e}")
+    comments = _db_list_comments_with_ids([cid])
+    expanded = [_expand_comment_record(rec, label, override_by=by_who, override_complaint=complaint) for rec in comments]
+    return expanded, status_badge("Comment saved.")
 
 
 # ------------------------- Tab 1: Persist edits/deletes -------------------------
 @app.callback(
-    Output("t1-comment-status", "children", allow_duplicate=True),  # show updates here in green pill
+    Output("t1-comment-status", "children", allow_duplicate=True),
     Input("t1-comments-table", "data_timestamp"),
     State("t1-comments-table", "data"),
     State("t1-comments-table", "data_previous"),
@@ -506,8 +513,8 @@ def t1_save_comment(selected_rows, active_cell, rows_json, complaint, date_str, 
 def t1_persist_comment_mutations(_ts, data, data_prev):
     """
     Detect row deletes or inline edits and update SQLite accordingly.
-    Only the Comment field is editable; everything else is locked.
     """
+    _ensure_comments_table()
     try:
         if data_prev is None:
             raise PreventUpdate
@@ -530,16 +537,13 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
                 _db_update_comment_text(cid, now.get("Comment") or "")
                 any_edit = True
 
-        if deleted_ids and any_edit:
-            return green_badge_component("Comment(s) edited and deleted.")
-        elif deleted_ids:
-            return green_badge_component("Comment deleted.")
-        elif any_edit:
-            return green_badge_component("Comment updated.")
-        else:
-            raise PreventUpdate
+        if deleted_ids:
+            return status_badge("Comment deleted.")
+        if any_edit:
+            return status_badge("Comment updated.")
+        raise PreventUpdate
     except Exception as e:
-        return green_badge_component(f"Comment persistence error: {e}")
+        return status_badge(f"Comment persistence error: {e}")
 
 
 # =========================
@@ -549,6 +553,7 @@ def _db_connect():
     return sqlite3.connect(td.DB_PATH, check_same_thread=False)
 
 def _db_list_comments_with_ids(customer_ids):
+    _ensure_comments_table()
     conn = _db_connect(); cur = conn.cursor()
     if customer_ids:
         vals = [int(x) for x in customer_ids]
@@ -562,6 +567,7 @@ def _db_list_comments_with_ids(customer_ids):
     else:
         cur.execute("SELECT id, date, comment, customer_label, customer_id, created_at FROM comments ORDER BY date ASC, id ASC")
     rows = cur.fetchall(); conn.close()
+    # return dicts
     return [{
         "_id": r[0],
         "Date": r[1],
@@ -582,13 +588,16 @@ def _db_update_comment_text(comment_id: int, new_text: str):
     conn.commit(); conn.close()
 
 def _expand_comment_record(rec, athlete_label, override_by=None, override_complaint=None):
+    """
+    Map raw DB row -> table row. We keep _id hidden for persistence.
+    """
     return {
         "_id": rec["_id"],
         "Date": rec["Date"],
         "By": override_by or "",            # we don’t store author; show current user on add
         "Athlete": athlete_label,
         "Complaint": override_complaint or "",
-        "Status": "",                       # placeholder for future status
+        "Status": "",                       # wire up if/when a status column is stored
         "Comment": rec["Comment"],
     }
 
