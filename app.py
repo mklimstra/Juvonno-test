@@ -12,7 +12,7 @@ import traceback
 
 from dash_auth_external import DashAuthExternal
 from dash.exceptions import PreventUpdate
-from dash import Dash, Input, Output, html, dcc, no_update, dash_table, State, callback_context
+from dash import Dash, Input, Output, html, dcc, no_update, dash_table, State
 import dash_bootstrap_components as dbc
 
 from html import escape as html_escape
@@ -41,11 +41,33 @@ assets_path = os.path.join(here, "assets")
 server.static_folder = assets_path
 server.static_url_path = "/assets"
 
-# Ensure the comments DB exists on first run (prevents first-select oddities)
-try:
-    td._db().close()
-except Exception:
-    pass
+# Ensure the comments DB exists and migrate schema to include 'complaint'
+def _ensure_db_and_migrate():
+    # create DB/table if needed (re-use td._db)
+    try:
+        conn = sqlite3.connect(td.DB_PATH, check_same_thread=False)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_id INTEGER,
+                customer_label TEXT,
+                date TEXT,
+                comment TEXT,
+                created_at TEXT
+            )
+        """)
+        # add complaint column if missing
+        cur.execute("PRAGMA table_info(comments)")
+        cols = [r[1] for r in cur.fetchall()]
+        if "complaint" not in cols:
+            cur.execute("ALTER TABLE comments ADD COLUMN complaint TEXT")
+        conn.commit()
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+_ensure_db_and_migrate()
 
 
 # ------------------------- Small helpers (pills/dots/colors) -------------------------
@@ -88,10 +110,6 @@ def dot(hex_color: str, size: int = 10, mr: int = 8) -> str:
     )
 
 def status_badge(text: str):
-    """
-    Return a small green pill-style badge as a Dash component
-    (prevents raw HTML from showing in the UI).
-    """
     if not text:
         return ""
     return html.Span(
@@ -113,7 +131,7 @@ def status_badge(text: str):
 # ------------------------- Tab 1 (Overview) Layout -------------------------
 def tab1_layout():
     return dbc.Container([
-        html.H3("Athlete List", className="mt-2"),
+        html.H3("Overview", className="mt-2"),
 
         dbc.Row([
             dbc.Col(dcc.Dropdown(
@@ -140,17 +158,24 @@ def tab1_layout():
                 html.Span(id="t1-selected-athlete-label", className="fw-semibold text-muted")
             ]),
             dbc.CardBody([
+
+                # Two-column layout: big textarea (left ~2/3), controls stacked (right ~1/3)
                 dbc.Row([
-                    dbc.Col(dcc.DatePickerSingle(id="t1-comment-date", display_format="YYYY-MM-DD"), md=3),
-                    dbc.Col(dcc.Dropdown(id="t1-complaint-dd", placeholder="Pick a complaint (optional)…"), md=4),
-                    dbc.Col(dcc.Textarea(
-                        id="t1-comment-text",
-                        placeholder="Add a note about the selected athlete…",
-                        style={"width":"100%","height":"80px"}), md=5),
+                    dbc.Col([
+                        dcc.Textarea(
+                            id="t1-comment-text",
+                            placeholder="Add a note about the selected athlete…",
+                            style={"width":"100%","height":"140px"}
+                        ),
+                    ], md=8),
+
+                    dbc.Col([
+                        dcc.DatePickerSingle(id="t1-comment-date", display_format="YYYY-MM-DD", style={"width":"100%"}),
+                        html.Div(dcc.Dropdown(id="t1-complaint-dd", placeholder="Pick a complaint (optional)…", style={"width":"100%"}),
+                                 className="mt-2"),
+                        dbc.Button("Save Comment", id="t1-save-comment", color="success", className="mt-2 w-100"),
+                    ], md=4),
                 ], className="g-2"),
-                dbc.Row([
-                    dbc.Col(dbc.Button("Save Comment", id="t1-save-comment", color="success"), width="auto"),
-                ], className="g-2 mt-2"),
 
                 html.Hr(),
 
@@ -163,19 +188,13 @@ def tab1_layout():
                         {"name":"Complaint","id":"Complaint"},
                         {"name":"Status","id":"Status"},
                         {"name":"Comment","id":"Comment", "editable": True},  # only editable column
-                        # Hidden technical id used for edit/delete
-                        {"name":"_id","id":"_id", "hidden": True},
+                        {"name":"_id","id":"_id", "hidden": True},            # hidden key
                     ],
                     data=[],
-                    row_deletable=True,               # delete icon per row
-                    editable=True,                    # allow inline edit of editable columns
-                    page_action="none",               # we use scroll, not pagination
-                    style_table={
-                        "overflowX": "auto",
-                        "maxHeight": "240px",         # ~5 rows visible then scroll
-                        "overflowY": "auto",
-                    },
-                    # Uniform spacing across cells/rows
+                    row_deletable=True,
+                    editable=True,
+                    page_action="none",
+                    style_table={"overflowX":"auto","maxHeight":"240px","overflowY":"auto"},
                     style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","lineHeight":"22px"},
                     style_cell={"padding":"9px","fontSize":14,"lineHeight":"22px",
                                 "fontFamily":"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
@@ -183,7 +202,7 @@ def tab1_layout():
                     style_data={"borderBottom":"1px solid #eceff4"},
                     style_data_conditional=[
                         {"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"},
-                        {"if": {"state": "selected"}, "backgroundColor": "#fdecea"},  # light red when selected
+                        {"if": {"state": "selected"}, "backgroundColor": "#fdecea"},
                     ],
                 ),
 
@@ -230,8 +249,8 @@ app.layout = html.Div([
             id="main-tabs",
             value="tab-1",
             children=[
-                dcc.Tab(label="Athlete Status", value="tab-1"),
-                dcc.Tab(label="Status Overview", value="tab-2"),
+                dcc.Tab(label="Overview", value="tab-1"),
+                dcc.Tab(label="Training Dashboard", value="tab-2"),
             ],
         ),
         html.Div(id="tabs-content", className="mt-3"),
@@ -393,7 +412,6 @@ def t1_load_customers(n_clicks, group_values):
             data=rows,
             columns=columns,
             markdown_options={"html": True},
-            # Filtering: case-insensitive + styled filter row
             filter_action="native",
             filter_options={"case": "insensitive"},
             style_filter={
@@ -402,9 +420,7 @@ def t1_load_customers(n_clicks, group_values):
                 "borderTop": "1px solid #e6ebf1",
                 "fontStyle": "italic",
             },
-            # Sorting
             sort_action="native",
-            # Scroll container to ~5 rows
             page_action="none",
             style_table={"overflowX":"auto", "maxHeight":"240px", "overflowY":"auto"},
             style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","lineHeight":"22px"},
@@ -439,13 +455,12 @@ def t1_load_customers(n_clicks, group_values):
     Output("t1-comment-status", "children", allow_duplicate=True),  # clear badge on selection
     Input("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
-    prevent_initial_call=True,  # <-- REQUIRED when using allow_duplicate in outputs
+    prevent_initial_call=True,
 )
 def t1_on_select(selected_rows, rows_json):
     if not rows_json:
         raise PreventUpdate
 
-    # Always set today's date and clear any prior status badge
     today = date.today().strftime("%Y-%m-%d")
 
     if not selected_rows:
@@ -489,14 +504,21 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
     cid = int(row["_cid"])
     label = row["_athlete_label"]
 
-    # Persist to SQLite (same DB used by training tab)
-    td.db_add_comment(cid, label, date_str, text.strip())
+    # Persist to SQLite with complaint (our own insert that includes complaint)
+    _db_add_comment(cid, label, date_str, text.strip(), complaint or "")
 
-    # User display (By:)
+    # Re-read; mark the newest row's "By"
     by_who = _get_signed_in_name()
-
     comments = _db_list_comments_with_ids([cid])
-    expanded = [_expand_comment_record(rec, label, override_by=by_who, override_complaint=complaint) for rec in comments]
+    expanded = [_expand_comment_record(rec, label) for rec in comments]
+    if expanded:
+        # assume highest _id is the one we just added
+        max_id = max(r["_id"] for r in expanded if r.get("_id") is not None)
+        for r in expanded:
+            if r["_id"] == max_id:
+                r["By"] = by_who
+                break
+
     return expanded, status_badge("Comment saved."), ""
 
 
@@ -511,6 +533,7 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
 def t1_persist_comment_mutations(_ts, data, data_prev):
     """
     Detect row deletes or inline edits and update SQLite accordingly.
+    Only the Comment column is editable; Complaint stays attached to the row.
     """
     try:
         if data_prev is None:
@@ -524,7 +547,7 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
         for i in deleted_ids:
             _db_delete_comment(i)
 
-        # Edits: present in both, comment text changed
+        # Edits: comment text changed
         any_edit = False
         for cid, now in now_by_id.items():
             before = prev_by_id.get(cid)
@@ -540,7 +563,6 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
             return status_badge("Comment updated.")
         raise PreventUpdate
     except Exception as e:
-        # use a red-ish badge on error
         return html.Span(
             f"Comment persistence error: {e}",
             style={
@@ -557,29 +579,68 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
 def _db_connect():
     return sqlite3.connect(td.DB_PATH, check_same_thread=False)
 
+def _db_add_comment(customer_id: int, customer_label: str, date_str: str, comment: str, complaint: str):
+    conn = _db_connect(); cur = conn.cursor()
+    # ensure column exists (defensive — migration already ran)
+    cur.execute("PRAGMA table_info(comments)")
+    cols = [r[1] for r in cur.fetchall()]
+    if "complaint" not in cols:
+        cur.execute("ALTER TABLE comments ADD COLUMN complaint TEXT")
+    cur.execute(
+        "INSERT INTO comments(customer_id, customer_label, date, comment, created_at, complaint) "
+        "VALUES (?, ?, ?, ?, datetime('now'), ?)",
+        (int(customer_id) if customer_id is not None else None, customer_label or "", date_str, comment, complaint or "")
+    )
+    conn.commit(); conn.close()
+
 def _db_list_comments_with_ids(customer_ids):
     conn = _db_connect(); cur = conn.cursor()
+    # read with complaint if present
+    cur.execute("PRAGMA table_info(comments)")
+    cols = [r[1] for r in cur.fetchall()]
+    has_complaint = "complaint" in cols
     if customer_ids:
         vals = [int(x) for x in customer_ids]
         q = ",".join("?" for _ in vals)
-        cur.execute(f"""
-          SELECT id, date, comment, customer_label, customer_id, created_at
-          FROM comments
-          WHERE customer_id IN ({q})
-          ORDER BY date ASC, id ASC
-        """, vals)
+        if has_complaint:
+            cur.execute(f"""
+              SELECT id, date, comment, customer_label, customer_id, created_at, complaint
+              FROM comments
+              WHERE customer_id IN ({q})
+              ORDER BY date ASC, id ASC
+            """, vals)
+        else:
+            cur.execute(f"""
+              SELECT id, date, comment, customer_label, customer_id, created_at
+              FROM comments
+              WHERE customer_id IN ({q})
+              ORDER BY date ASC, id ASC
+            """, vals)
     else:
-        cur.execute("SELECT id, date, comment, customer_label, customer_id, created_at FROM comments ORDER BY date ASC, id ASC")
+        if has_complaint:
+            cur.execute("SELECT id, date, comment, customer_label, customer_id, created_at, complaint FROM comments ORDER BY date ASC, id ASC")
+        else:
+            cur.execute("SELECT id, date, comment, customer_label, customer_id, created_at FROM comments ORDER BY date ASC, id ASC")
     rows = cur.fetchall(); conn.close()
-    # return dicts
-    return [{
-        "_id": r[0],
-        "Date": r[1],
-        "Comment": r[2],
-        "Athlete": r[3],
-        "_cid": r[4],
-        "_created_at": r[5],
-    } for r in rows]
+
+    out = []
+    for r in rows:
+        # unpack depending on presence of complaint
+        if len(r) == 7:
+            _id, dt, comment, label, cid, created_at, complaint = r
+        else:
+            _id, dt, comment, label, cid, created_at = r
+            complaint = ""
+        out.append({
+            "_id": _id,
+            "Date": dt,
+            "Comment": comment,
+            "Athlete": label,
+            "Complaint": complaint or "",
+            "_cid": cid,
+            "_created_at": created_at,
+        })
+    return out
 
 def _db_delete_comment(comment_id: int):
     conn = _db_connect(); cur = conn.cursor()
@@ -591,17 +652,17 @@ def _db_update_comment_text(comment_id: int, new_text: str):
     cur.execute("UPDATE comments SET comment = ? WHERE id = ?", (new_text, int(comment_id)))
     conn.commit(); conn.close()
 
-def _expand_comment_record(rec, athlete_label, override_by=None, override_complaint=None):
+def _expand_comment_record(rec, athlete_label):
     """
-    Map raw DB row -> table row. We keep _id hidden for persistence.
+    Map raw DB row -> table row. Keep complaint bound to the row.
     """
     return {
         "_id": rec["_id"],
         "Date": rec["Date"],
-        "By": override_by or "",            # we don’t store author; show current user on add
+        "By": "",                         # we don’t store author; set only on the newest row after save
         "Athlete": athlete_label,
-        "Complaint": override_complaint or "",
-        "Status": "",                       # wire up if/when a status column is stored
+        "Complaint": rec.get("Complaint", "") or "",
+        "Status": "",                     # placeholder for future
         "Comment": rec["Comment"],
     }
 
