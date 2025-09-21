@@ -113,7 +113,7 @@ def status_badge(text: str):
 # ------------------------- Tab 1 (Overview) Layout -------------------------
 def tab1_layout():
     return dbc.Container([
-        html.H3("Athlete Status", className="mt-2"),
+        html.H3("Athlete List", className="mt-2"),
 
         dbc.Row([
             dbc.Col(dcc.Dropdown(
@@ -230,8 +230,8 @@ app.layout = html.Div([
             id="main-tabs",
             value="tab-1",
             children=[
-                dcc.Tab(label="", value="tab-1"),
-                dcc.Tab(label="Training Dashboard", value="tab-2"),
+                dcc.Tab(label="Athlete Status", value="tab-1"),
+                dcc.Tab(label="Status Overview", value="tab-2"),
             ],
         ),
         html.Div(id="tabs-content", className="mt-3"),
