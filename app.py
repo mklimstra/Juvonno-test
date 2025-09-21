@@ -16,7 +16,7 @@ from dash.exceptions import PreventUpdate
 
 # Repo-auth + layout
 from dash_auth_external import DashAuthExternal
-from layout import Footer, Navbar, Pagination, GeographyFilters
+from layout import Footer, Navbar, Pagination, GeographyFilters  # Pagination, GeographyFilters unused but keeps parity
 from settings import *  # AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLIENT_SECRET
 
 # Reuse your working Juvonno + dashboard plumbing
@@ -24,7 +24,9 @@ from training_dashboard import (
     _require_api_key, _get, tidy_date_str,
     fetch_customers_full, list_complaints_for_appt,
     extract_training_status, encounter_ids_for_appt, fetch_encounter,
-    PASTEL_COLOR, STATUS_ORDER, GROUP_OPTS, _norm,
+    STATUS_ORDER, GROUP_OPTS, _norm,
+    DB_PATH,  # for comments DB
+    layout_body as training_layout_body,
 )
 
 # ────────────────────────────────────────────────────────────
@@ -90,18 +92,9 @@ def _latest_status_fast(appt_list):
     except Exception:
         return ""
 
-def _status_html(text: str) -> str:
-    color = PASTEL_COLOR.get(text, "#e6e6e6")
-    return (
-        f'<span style="display:inline-block;width:10px;height:10px;border-radius:50%;'
-        f'background:{color};border:1px solid rgba(0,0,0,.25);margin-right:6px"></span>'
-        f'{text}'
-    )
-
 # ────────────────────────────────────────────────────────────
 # Comments persistence (extend the same DB used by training_dashboard)
 # We add columns author, complaint, status if they don't exist.
-from training_dashboard import DB_PATH  # uses comments.db in this folder
 
 def _ensure_comment_columns():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -206,15 +199,16 @@ def render_tab1():
         # Grid
         html.Div(id="t1-grid-container", className="mb-3"),
         dcc.Store(id="t1-rows-json"),
+        dcc.Store(id="t1-selected-cid"),
 
-        # Comments panel (Tab 1)
+        # Comments panel (Tab 1) — athlete is taken from grid selection
         dbc.Card([
             dbc.CardHeader("Comments", className="bg-light"),
             dbc.CardBody([
                 dbc.Row([
-                    dbc.Col(dcc.Dropdown(id="t1-athlete-dd", placeholder="Choose athlete …"), md=4),
-                    dbc.Col(dcc.Dropdown(id="t1-complaint-dd", placeholder="Choose complaint …"), md=4),
-                    dbc.Col(dcc.DatePickerSingle(id="t1-date", display_format="YYYY-MM-DD"), md=2),
+                    dbc.Col(dcc.Dropdown(id="t1-complaint-dd", placeholder="Choose complaint …"), md=5),
+                    dbc.Col(dcc.DatePickerSingle(id="t1-date", display_format="YYYY-MM-DD"), md=3),
+                    dbc.Col(dbc.Button("Save Comment", id="t1-save", color="success", className="w-100"), md=2),
                 ], className="g-2 mb-2"),
                 dbc.Row([
                     dbc.Col(dcc.Textarea(
@@ -222,7 +216,6 @@ def render_tab1():
                         placeholder="Add a note for this athlete + complaint …",
                         style={"width":"100%","height":"80px"}
                     ), md=10),
-                    dbc.Col(dbc.Button("Save Comment", id="t1-save", color="success", className="w-100"), md=2),
                 ], className="g-2"),
                 html.Div(id="t1-comment-hint", className="text-muted mt-1", style={"fontSize":"12px"}),
                 html.Hr(),
@@ -239,7 +232,7 @@ def render_tab1():
                     rowData=[],
                     defaultColDef={"resizable":True,"filter":True,"sortable":True,"floatingFilter":True},
                     dashGridOptions={
-                        "pagination": True, "paginationPageSize": 10,
+                        "pagination": True, "paginationPageSize": 20,
                         "paginationPageSizeSelector": [10, 20, 50, 100],
                         "animateRows": True
                     },
@@ -251,7 +244,6 @@ def render_tab1():
     ], fluid=True)
 
 def render_tab2():
-    from training_dashboard import layout_body as training_layout_body
     return training_layout_body()
 
 @app.callback(Output("tab-content", "children"), Input("tabs", "value"))
@@ -315,49 +307,13 @@ def refresh_user_label(_):
         return no_update
 
 # ────────────────────────────────────────────────────────────
-# Tab 1: fetch & render athletes grid (fast) + wire Comments
-
-def _pill_renderer():
-    # returns a renderer dict accepted by dash-ag-grid that builds DOM and sets innerHTML
-    return {
-        "function": """
-        function(params) {
-            const arr = Array.isArray(params.value)
-              ? params.value
-              : String(params.value || "")
-                 .split(";")
-                 .map(s => s.trim())
-                 .filter(Boolean);
-            const html = arr.map(t =>
-              `<span style="display:inline-block;padding:3px 8px;border-radius:9999px;
-                font-size:12px;background:#f1f3f5;color:#111;border:1px solid #e3e6eb;
-                margin:2px 6px 2px 0">${t}</span>`
-            ).join(" ");
-            const e = document.createElement("span");
-            e.innerHTML = html;
-            return e;
-        }
-        """
-    }
-
-def _html_renderer():
-    return {
-        "function": """
-        function(params){
-            const e = document.createElement("span");
-            e.innerHTML = params.value || "";
-            return e;
-        }
-        """
-    }
+# Tab 1: fetch & render athletes grid (FAST) — no pills, no HTML renderers
 
 def _build_grid(rows):
     col_defs = [
         {"headerName":"Athlete","field":"Athlete","flex":2, "filter":True, "sortable":True},
-        {"headerName":"Groups","field":"Groups","flex":2, "cellRenderer": _pill_renderer()},
-        {"headerName":"Current Status","field":"Current Status","flex":2,
-         "cellRenderer": _html_renderer(), "filter":True, "sortable":True},
-        {"headerName":"Complaints","field":"Complaints","flex":3, "cellRenderer": _pill_renderer()},
+        {"headerName":"Groups","field":"Groups","flex":2, "filter":True, "sortable":True},
+        {"headerName":"Current Status","field":"Current Status","flex":2, "filter":True, "sortable":True},
         {"headerName":"Last Appt","field":"Last Appt","flex":1, "filter":True, "sortable":True},
         {"headerName":"_cid","field":"_cid","hide":True},
     ]
@@ -377,14 +333,11 @@ def _build_grid(rows):
         },
         className="ag-theme-quartz",
         style={"height":"520px","width":"100%"},
-        dangerously_allow_code=True,
     )
 
 @app.callback(
     Output("t1-grid-container", "children"),
     Output("t1-rows-json", "data"),
-    Output("t1-athlete-dd", "options"),
-    Output("t1-athlete-dd", "value"),
     Output("t1-msg", "children"),
     Output("t1-msg", "is_open"),
     Input("t1-load", "n_clicks"),
@@ -395,7 +348,7 @@ def t1_fetch(n_clicks, group_values):
     try:
         _require_api_key()
         if not group_values:
-            return no_update, no_update, [], None, "Select at least one group.", True
+            return no_update, no_update, "Select at least one group.", True
 
         # Fresh fetch of customers (same approach as training_dashboard)
         customers_by_id = fetch_customers_full()
@@ -419,7 +372,7 @@ def t1_fetch(n_clicks, group_values):
         filtered_cids = [cid for cid, gs in cid_to_groups.items() if targets & set(gs)]
 
         if not filtered_cids:
-            return html.Div("No athletes found for those groups."), [], [], None, "", False
+            return html.Div("No athletes found for those groups."), [], "", False
 
         # Fetch appointments once (branch 1) and map to customers
         def fetch_branch_appts(branch=1):
@@ -441,35 +394,85 @@ def t1_fetch(n_clicks, group_values):
             if isinstance(cust, dict) and cust.get("id"):
                 cid_to_appts.setdefault(cust["id"], []).append(ap)
 
-        # Build rows (FAST) + complaints-from-appointments (fast)
+        # Build rows (FAST, no complaints here)
         rows = []
-        dd_opts = []
         for cid in filtered_cids:
             cust = customers_by_id.get(cid, {}) or {}
             first = cust.get("first_name", "") or ""
             last  = cust.get("last_name", "") or ""
             athlete_label = f"{first} {last}".strip() or f"ID {cid}"
 
-            grp_display = [g.title() for g in cid_to_groups.get(cid, [])]
+            grp_display = ", ".join(g.title() for g in cid_to_groups.get(cid, []))
             my_appts    = cid_to_appts.get(cid, [])
 
             # Status & last appt
-            current_status = _latest_status_fast(my_appts)
+            current_status = _latest_status_fast(my_appts) or "—"
             last_appt     = _last_appt_date(my_appts)
 
-            # Complaints from appointments only (fast)
-            comp_names = set()
-            for ap in my_appts:
+            rows.append({
+                "Athlete": athlete_label,
+                "Groups": grp_display,
+                "Current Status": current_status,
+                "Last Appt": last_appt,
+                "_cid": int(cid),
+            })
+
+        rows.sort(key=lambda r: r["Athlete"].lower())
+        grid = _build_grid(rows)
+        rows_json = json.loads(json.dumps(rows, default=_json_safe))
+
+        return grid, rows_json, "", False
+
+    except Exception as e:
+        return no_update, no_update, f"Error: {e}", True
+
+# When the user selects a row in the grid:
+#  - Remember selected cid
+#  - Build complaint dropdown options (for that athlete only)
+#  - Default date = today
+#  - Refresh comments grid for that athlete
+@app.callback(
+    Output("t1-selected-cid", "data"),
+    Output("t1-complaint-dd", "options"),
+    Output("t1-complaint-dd", "value"),
+    Output("t1-date", "date"),
+    Output("t1-comment-hint", "children"),
+    Output("t1-comments-grid", "rowData"),
+    Input("t1-grid", "selectedRows"),
+    State("t1-rows-json", "data"),
+    prevent_initial_call=True
+)
+def t1_on_select(selected_rows, rows_json):
+    if not selected_rows:
+        raise PreventUpdate
+
+    try:
+        sel = selected_rows[0]
+        cid = int(sel.get("_cid"))
+    except Exception:
+        raise PreventUpdate
+
+    # Build complaints for this athlete (only now, for speed)
+    # We recreate the minimal appointments list for this cid
+    # by reading back from rows_json? We need actual appts; fetch now:
+    # Use the same quick fetch as above but filtered by customer inline
+    complaints = set()
+    page = 1
+    while True:
+        js = _get(f"appointments/list/1", start_date="2000-01-01", status="all", page=page, count=100)
+        block = js.get("list", js)
+        if not block: break
+        for ap in block:
+            cust = ap.get("customer") or {}
+            if isinstance(cust, dict) and int(cust.get("id", -1)) == cid:
                 aid = ap.get("id")
-                # structured complaints
+                # structured appointment complaints
                 try:
                     for rec in list_complaints_for_appt(aid):
-                        nm = None
                         for k in ("name","title","problem","injury","body_part","complaint"):
                             v = rec.get(k)
                             if isinstance(v, str) and v.strip():
-                                nm = v.strip(); break
-                        if nm: comp_names.add(nm)
+                                complaints.add(v.strip()); break
                 except Exception:
                     pass
                 # inline complaint
@@ -478,62 +481,29 @@ def t1_fetch(n_clicks, group_values):
                     for k in ("name","title","problem","injury","body_part","complaint"):
                         v = comp_inline.get(k)
                         if isinstance(v, str) and v.strip():
-                            comp_names.add(v.strip()); break
+                            complaints.add(v.strip()); break
+        if len(block) < 100: break
+        page += 1
 
-            comp_list = sorted(comp_names)
+    opts = [{"label": c, "value": c} for c in sorted(complaints)]
+    default_val = opts[0]["value"] if opts else None
 
-            rows.append({
-                "Athlete": athlete_label,
-                "Groups": grp_display,
-                "Current Status": _status_html(current_status),
-                "Complaints": comp_list,
-                "Last Appt": last_appt,
-                "_cid": int(cid),
-            })
-            dd_opts.append({"label": athlete_label, "value": int(cid)})
+    # Load existing comments for this athlete
+    comments = list_comments_for_customer(cid)
 
-        rows.sort(key=lambda r: r["Athlete"].lower())
-        dd_opts.sort(key=lambda o: o["label"].lower())
+    return (
+        cid,
+        opts, default_val,
+        _fmt_date(date.today()),
+        "Selected athlete set from the table. Choose a complaint and add a note.",
+        comments
+    )
 
-        grid = _build_grid(rows)
-        rows_json = json.loads(json.dumps(rows, default=_json_safe))
-
-        # Default athlete = first in list
-        default_cid = dd_opts[0]["value"] if dd_opts else None
-
-        return grid, rows_json, dd_opts, default_cid, "", False
-
-    except Exception as e:
-        return no_update, no_update, [], None, f"Error: {e}", True
-
-# When athlete changes → populate complaints dd + set date default = today
-@app.callback(
-    Output("t1-complaint-dd", "options"),
-    Output("t1-complaint-dd", "value"),
-    Output("t1-date", "date"),
-    Output("t1-comment-hint", "children"),
-    Input("t1-athlete-dd", "value"),
-    State("t1-rows-json", "data"),
-)
-def t1_set_complaints(selected_cid, rows_json):
-    if not selected_cid or not rows_json:
-        return [], None, _fmt_date(date.today()), "Select an athlete to add/view comments."
-    try:
-        comp_list = []
-        for r in rows_json:
-            if int(r.get("_cid")) == int(selected_cid):
-                comp_list = r.get("Complaints") or []
-                break
-        opts = [{"label": c, "value": c} for c in comp_list] or []
-        default_val = opts[0]["value"] if opts else None
-        return opts, default_val, _fmt_date(date.today()), "Fill out the comment and click Save."
-    except Exception:
-        return [], None, _fmt_date(date.today()), "Fill out the comment and click Save."
-
-# Save comment (Tab 1) with author + status → DB; refresh table
+# Save comment (Tab 1) with author + status → DB; refresh table and clear textarea
 @app.callback(
     Output("t1-comments-grid", "rowData"),
-    State("t1-athlete-dd", "value"),
+    Output("t1-comment-text", "value"),
+    State("t1-selected-cid", "data"),
     State("t1-rows-json", "data"),
     State("t1-complaint-dd", "value"),
     State("t1-date", "date"),
@@ -546,15 +516,14 @@ def t1_save_comment(selected_cid, rows_json, complaint, date_str, text, me_json,
     if not selected_cid or not date_str or not (text or "").strip():
         raise PreventUpdate
 
+    # Find athlete label + status from the rows_json
     label = f"ID {selected_cid}"
     status = ""
     if rows_json:
         for r in rows_json:
             if int(r.get("_cid")) == int(selected_cid):
                 label = r.get("Athlete") or label
-                raw = r.get("Current Status") or ""
-                status = (str(raw).split("</span>", 1)[-1].strip()
-                          if "</span>" in str(raw) else str(raw))
+                status = r.get("Current Status") or ""
                 break
 
     author = ""
@@ -573,21 +542,23 @@ def t1_save_comment(selected_cid, rows_json, complaint, date_str, text, me_json,
         complaint=complaint or "",
         status=status or "",
     )
-    return list_comments_for_customer(int(selected_cid))
+    # Refresh comments + clear textarea
+    return list_comments_for_customer(int(selected_cid)), ""
 
-# Also refresh comments grid when athlete changes (without saving)
+# Also refresh comments grid when tab switches back to tab1 (optional safety)
 @app.callback(
     Output("t1-comments-grid", "rowData", allow_duplicate=True),
-    Input("t1-athlete-dd", "value"),
+    Input("tabs", "value"),
+    State("t1-selected-cid", "data"),
     prevent_initial_call=True
 )
-def t1_refresh_comments_on_select(selected_cid):
-    if not selected_cid:
-        return []
-    return list_comments_for_customer(int(selected_cid))
+def t1_refresh_on_tab(tab_value, cid):
+    if tab_value != "tab1" or not cid:
+        raise PreventUpdate
+    return list_comments_for_customer(int(cid))
 
 # ────────────────────────────────────────────────────────────
-# Tab 2: register existing training dashboard callbacks
+# Tab 2: register existing training dashboard callbacks (unchanged)
 def _register_training_callbacks(app: Dash):
     from training_dashboard import register_callbacks as td_register_callbacks
     td_register_callbacks(app)
