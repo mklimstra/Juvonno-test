@@ -1,7 +1,7 @@
 # app.py
 import os
-import math
 import json
+import math
 import hashlib
 import sqlite3
 from datetime import date
@@ -97,6 +97,7 @@ def tab1_layout():
             dbc.Col(dbc.Button("Load", id="t1-load", color="primary", className="w-100"), md=2),
         ], className="g-2 mb-2"),
 
+        # general error banner for tab 1
         dbc.Alert(id="t1-msg", is_open=False, color="danger"),
 
         # main table
@@ -113,7 +114,10 @@ def tab1_layout():
             ]),
             dbc.CardBody([
                 dbc.Row([
-                    dbc.Col(dcc.DatePickerSingle(id="t1-comment-date", display_format="YYYY-MM-DD"), md=3),
+                    dbc.Col(dcc.DatePickerSingle(
+                        id="t1-comment-date",
+                        display_format="YYYY-MM-DD"
+                    ), md=3),
                     dbc.Col(dcc.Dropdown(id="t1-complaint-dd", placeholder="Pick a complaint (optional)…"), md=4),
                     dbc.Col(dcc.Textarea(
                         id="t1-comment-text",
@@ -122,7 +126,6 @@ def tab1_layout():
                 ], className="g-2"),
                 dbc.Row([
                     dbc.Col(dbc.Button("Save Comment", id="t1-save-comment", color="success"), width="auto"),
-                    dbc.Col(html.Div(id="t1-comment-hint", className="text-muted", style={"fontSize":"12px"}))
                 ], className="g-2 mt-2"),
 
                 html.Hr(),
@@ -130,18 +133,17 @@ def tab1_layout():
                 dash_table.DataTable(
                     id="t1-comments-table",
                     columns=[
-                        {"name":"Date","id":"Date"},
-                        {"name":"By","id":"By"},
-                        {"name":"Athlete","id":"Athlete"},
-                        {"name":"Complaint","id":"Complaint"},
-                        {"name":"Status","id":"Status"},
-                        {"name":"Comment","id":"Comment", "editable": True},
-                        # Hidden technical id used for edit/delete
-                        {"name":"_id","id":"_id", "hidden": True},
+                        {"name":"Date","id":"Date", "editable": False},
+                        {"name":"By","id":"By", "editable": False},
+                        {"name":"Athlete","id":"Athlete", "editable": False},
+                        {"name":"Complaint","id":"Complaint", "editable": False},
+                        {"name":"Status","id":"Status", "editable": False},
+                        {"name":"Comment","id":"Comment", "editable": True},   # only this is editable
+                        {"name":"_id","id":"_id", "hidden": True, "editable": False},  # internal id
                     ],
                     data=[],
                     row_deletable=True,               # delete icon per row
-                    editable=True,                    # allow inline edit of editable columns
+                    editable=False,                   # table-level; per-column overrides apply
                     page_action="none",               # we use scroll, not pagination
                     style_table={
                         "overflowX": "auto",
@@ -155,6 +157,26 @@ def tab1_layout():
                                 "textAlign":"left"},
                     style_data={"borderBottom":"1px solid #eceff4"},
                     style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
+                ),
+
+                # small, stylish success flag at the BOTTOM of card
+                html.Div(
+                    dbc.Alert(
+                        id="t1-comment-status",
+                        is_open=False,
+                        color="success",
+                        className="py-1 px-2",
+                        style={
+                            "backgroundColor": "#eaf7ea",
+                            "border": "1px solid #cfe9cf",
+                            "color": "#1f7a1f",
+                            "fontSize": "12px",
+                            "display": "inline-block",
+                            "marginTop": "10px",
+                            "borderRadius": "6px"
+                        }
+                    ),
+                    className="d-flex justify-content-end"
                 ),
             ])
         ], className="mb-4"),
@@ -396,7 +418,7 @@ def t1_load_customers(n_clicks, group_values):
         return no_update, no_update, msg, True
 
 
-# ------------------------- Tab 1: On select athlete -------------------------
+# ------------------------- Tab 1: On select athlete (robust) -------------------------
 @app.callback(
     Output("t1-complaint-dd", "options"),
     Output("t1-complaint-dd", "value"),
@@ -405,16 +427,26 @@ def t1_load_customers(n_clicks, group_values):
     Output("t1-selected-athlete-label", "children"),
     Output("t1-comment-date", "date"),
     Input("t1-athlete-table", "selected_rows"),
+    Input("t1-athlete-table", "active_cell"),
     State("t1-rows-json", "data"),
 )
-def t1_on_select(selected_rows, rows_json):
+def t1_on_select(selected_rows, active_cell, rows_json):
     if not rows_json:
         raise PreventUpdate
-    if not selected_rows:
+
+    # Determine the clicked/selected row index robustly
+    idx = None
+    if selected_rows:
+        idx = selected_rows[0]
+    elif active_cell and isinstance(active_cell, dict) and active_cell.get("row") is not None:
+        idx = active_cell["row"]
+
+    # No selection yet → reset UI with today's date
+    if idx is None or idx < 0 or idx >= len(rows_json):
         today = date.today().strftime("%Y-%m-%d")
         return [], None, [], "Select an athlete above; comments will filter to that athlete.", "", today
 
-    row = rows_json[selected_rows[0]]
+    row = rows_json[idx]
     cid = int(row["_cid"])
     label = row["_athlete_label"]
 
@@ -465,8 +497,8 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
 
 # ------------------------- Tab 1: Persist edits/deletes -------------------------
 @app.callback(
-    Output("t1-msg", "is_open", allow_duplicate=True),
-    Output("t1-msg", "children", allow_duplicate=True),
+    Output("t1-comment-status", "is_open"),
+    Output("t1-comment-status", "children"),
     Input("t1-comments-table", "data_timestamp"),
     State("t1-comments-table", "data"),
     State("t1-comments-table", "data_previous"),
@@ -475,6 +507,7 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
 def t1_persist_comment_mutations(_ts, data, data_prev):
     """
     Detect row deletes or inline edits and update SQLite accordingly.
+    Shows a small green flag at the bottom-right of the comments card.
     """
     try:
         if data_prev is None:
@@ -503,6 +536,7 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
         else:
             raise PreventUpdate
     except Exception as e:
+        # still surface issues through the same green badge but with text
         return True, f"Comment persistence error: {e}"
 
 
@@ -543,7 +577,7 @@ def _db_delete_comment(comment_id: int):
 
 def _db_update_comment_text(comment_id: int, new_text: str):
     conn = _db_connect(); cur = conn.cursor()
-    cur.execute("UPDATE comments SET comment = ? WHERE id = ?", (new_text, int(comment_id)))
+    cur.execute("UPDATE comments SET comment = ? WHERE id = ?", (new_text, int(comment_id)))  # <-- WRONG
     conn.commit(); conn.close()
 
 def _expand_comment_record(rec, athlete_label, override_by=None, override_complaint=None):
@@ -585,5 +619,4 @@ td.register_callbacks(app)
 
 # ------------------------- Main -------------------------
 if __name__ == "__main__":
-    # IMPORTANT: provide a body so the block is valid
     app.run(debug=False, port=8050)
