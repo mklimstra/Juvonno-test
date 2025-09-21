@@ -3,6 +3,8 @@ import os
 import math
 import json
 import hashlib
+import sqlite3
+from datetime import datetime, date
 import requests
 import pandas as pd
 import dash
@@ -40,22 +42,10 @@ server.static_folder = assets_path
 server.static_url_path = "/assets"
 
 
-# ------------------------- Dash app -------------------------
-app = Dash(
-    __name__,
-    server=server,
-    external_stylesheets=[
-        dbc.themes.BOOTSTRAP,
-        "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css",
-    ],
-    suppress_callback_exceptions=True,
-)
-
-
 # ------------------------- Small helpers (pills/dots/colors) -------------------------
 PILL_BG_DEFAULT = "#eef2f7"
 
-# nice, soft pastel palette; stable selection via md5(text) % len(PALETTE)
+# soft pastel palette; stable selection via md5(text) % len(PALETTE)
 PALETTE = [
     "#e7f0ff",  # blue-ish
     "#fde2cf",  # peach
@@ -117,7 +107,10 @@ def tab1_layout():
 
         # Comments section bound to the selected row in the table
         dbc.Card([
-            dbc.CardHeader("Comments"),
+            dbc.CardHeader([
+                html.Span("Comments", className="me-2"),
+                html.Span(id="t1-selected-athlete-label", className="fw-semibold text-muted")
+            ]),
             dbc.CardBody([
                 dbc.Row([
                     dbc.Col(dcc.DatePickerSingle(id="t1-comment-date", display_format="YYYY-MM-DD"), md=3),
@@ -142,19 +135,26 @@ def tab1_layout():
                         {"name":"Athlete","id":"Athlete"},
                         {"name":"Complaint","id":"Complaint"},
                         {"name":"Status","id":"Status"},
-                        {"name":"Comment","id":"Comment"},
+                        {"name":"Comment","id":"Comment", "editable": True},
+                        # Hidden technical id used for edit/delete
+                        {"name":"_id","id":"_id", "hidden": True},
                     ],
                     data=[],
-                    page_size=10,
-                    style_header={"fontWeight":"600","backgroundColor":"#f8f9fa"},
-                    style_cell={
-                        "padding":"8px","fontSize":13,
-                        "fontFamily":"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
-                        "textAlign":"left"
+                    row_deletable=True,               # delete icon per row
+                    editable=True,                    # allow inline edit of editable columns
+                    page_action="none",               # we use scroll, not pagination
+                    style_table={
+                        "overflowX": "auto",
+                        "maxHeight": "240px",         # ~5 rows visible then scroll
+                        "overflowY": "auto",
                     },
-                    style_data={
-                        "whiteSpace":"normal","height":"auto","borderBottom":"1px solid #eee"
-                    },
+                    # Uniform spacing across cells/rows
+                    style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","lineHeight":"22px"},
+                    style_cell={"padding":"9px","fontSize":14,"lineHeight":"22px",
+                                "fontFamily":"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
+                                "textAlign":"left"},
+                    style_data={"borderBottom":"1px solid #eceff4"},
+                    style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
                 ),
             ])
         ], className="mb-4"),
@@ -207,7 +207,7 @@ def render_tab(which):
     return tab1_layout() if which == "tab-1" else tab2_layout()
 
 
-# ------------------------- Auth / Navbar user -------------------------
+# ------------------------- Auth / Navbar user & login redirect -------------------------
 @app.callback(
     Output("redirect-to", "href"),
     Input("init-interval", "n_intervals"),
@@ -226,11 +226,10 @@ def initial_view(n, pathname):
     if token:
         return no_update
 
-    # Already at /login? do nothing.
     if (pathname or "").rstrip("/") == "/login":
         return no_update
 
-    return "login"  # relative path works on Posit Connect under /content/<id>
+    return "login"
 
 
 @app.callback(
@@ -256,7 +255,7 @@ def refresh_user_badge(_n):
         return html.A("Sign in", href="login", className="link-light")
 
 
-# ------------------------- Tab 1 Callbacks -------------------------
+# ------------------------- Tab 1: Load Customers -------------------------
 @app.callback(
     Output("t1-grid-container", "children"),
     Output("t1-rows-json", "data"),
@@ -279,7 +278,8 @@ def t1_load_customers(n_clicks, group_values):
             if not (targets & cust_groups):
                 continue
 
-            name = f"{cust.get('first_name','')} {cust.get('last_name','')}".strip()
+            first = (cust.get("first_name") or "").strip()
+            last  = (cust.get("last_name") or "").strip()
 
             # colorful pills per group
             groups_html = " ".join(
@@ -293,13 +293,11 @@ def t1_load_customers(n_clicks, group_values):
                 aid = ap.get("id")
                 date_str = td.tidy_date_str(ap.get("date"))
                 dt = pd.to_datetime(date_str, errors="coerce")
-                if pd.isna(dt):
-                    continue
+                if pd.isna(dt): continue
                 eids = td.encounter_ids_for_appt(aid)
                 max_eid = max(eids) if eids else None
                 s = td.extract_training_status(td.fetch_encounter(max_eid)) if max_eid else ""
-                if s:
-                    status_rows.append((dt.normalize(), s))
+                if s: status_rows.append((dt.normalize(), s))
 
             current_status = ""
             if status_rows:
@@ -314,7 +312,7 @@ def t1_load_customers(n_clicks, group_values):
             status_color = td.PASTEL_COLOR.get(current_status, "#e6e6e6")
             status_html = f"{dot(status_color)}{html_escape(current_status) if current_status else '—'}" if current_status else "—"
 
-            # Complaints pills (also colorful)
+            # Complaints pills
             complaints = td.fetch_customer_complaints(cid)
             complaint_names = [c["Title"] for c in complaints if c.get("Title")]
             complaints_html = " ".join(
@@ -322,20 +320,23 @@ def t1_load_customers(n_clicks, group_values):
             ) if complaint_names else "—"
 
             rows.append({
-                "Athlete": name,
+                "First Name": first,
+                "Last Name":  last,
                 "Groups": groups_html,
                 "Current Status": status_html,
                 "Complaints": complaints_html,
                 "DOB": cust.get("dob") or cust.get("birthdate") or "—",
                 "Sex": cust.get("sex") or cust.get("gender") or "—",
                 "_cid": cid,
+                "_athlete_label": f"{first} {last}".strip(),
             })
 
         if not rows:
             return html.Div("No athletes in those groups."), [], "", False
 
         columns = [
-            {"name":"Athlete", "id":"Athlete"},
+            {"name":"First Name", "id":"First Name"},
+            {"name":"Last Name",  "id":"Last Name"},
             {"name":"Groups", "id":"Groups", "presentation":"markdown"},
             {"name":"Current Status", "id":"Current Status", "presentation":"markdown"},
             {"name":"Complaints", "id":"Complaints", "presentation":"markdown"},
@@ -343,6 +344,7 @@ def t1_load_customers(n_clicks, group_values):
             {"name":"Sex", "id":"Sex"},
         ]
 
+        # ~5 visible rows with scroll, consistent spacing
         table = dash_table.DataTable(
             id="t1-athlete-table",
             data=rows,
@@ -357,12 +359,13 @@ def t1_load_customers(n_clicks, group_values):
                 "borderTop": "1px solid #e6ebf1",
                 "fontStyle": "italic",
             },
-            # Sorting + paging
+            # Sorting
             sort_action="native",
-            page_size=15,
-            style_table={"overflowX":"auto"},
-            style_header={"fontWeight":"600","backgroundColor":"#f8f9fa"},
-            style_cell={"padding":"9px","fontSize":14,
+            # Scroll container to ~5 rows
+            page_action="none",
+            style_table={"overflowX":"auto", "maxHeight":"240px", "overflowY":"auto"},
+            style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","lineHeight":"22px"},
+            style_cell={"padding":"9px","fontSize":14,"lineHeight":"22px",
                         "fontFamily":"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
                         "textAlign":"left"},
             style_data={"borderBottom":"1px solid #eceff4"},
@@ -383,11 +386,14 @@ def t1_load_customers(n_clicks, group_values):
         return no_update, no_update, msg, True
 
 
+# ------------------------- Tab 1: On select athlete -------------------------
 @app.callback(
     Output("t1-complaint-dd", "options"),
     Output("t1-complaint-dd", "value"),
     Output("t1-comments-table", "data"),
     Output("t1-comment-hint", "children"),
+    Output("t1-selected-athlete-label", "children"),
+    Output("t1-comment-date", "date"),
     Input("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
 )
@@ -395,31 +401,29 @@ def t1_on_select(selected_rows, rows_json):
     if not rows_json:
         raise PreventUpdate
     if not selected_rows:
-        return [], None, [], "Select an athlete above; comments will filter to that athlete."
+        today = date.today().strftime("%Y-%m-%d")
+        return [], None, [], "Select an athlete above; comments will filter to that athlete.", "", today
 
     row = rows_json[selected_rows[0]]
     cid = int(row["_cid"])
+    label = row["_athlete_label"]
 
+    # complaint options for dropdown
     complaints = td.fetch_customer_complaints(cid)
     names = [c["Title"] for c in complaints if c.get("Title")]
     opts = [{"label": n, "value": n} for n in sorted(set(names))]
     val = opts[0]["value"] if opts else None
 
-    # existing comments for this athlete (from SQLite)
-    comments_raw = td.db_list_comments([cid])
-    expanded = []
-    for c in comments_raw:
-        expanded.append({
-            "Date": c["Date"],
-            "By": "",  # will fill on save if available
-            "Athlete": row["Athlete"],
-            "Complaint": "",  # will fill on save if provided
-            "Status": "",
-            "Comment": c["Comment"],
-        })
-    return opts, val, expanded, f"Adding comment for: {row['Athlete']}"
+    # existing comments for this athlete (with ids)
+    comments = _db_list_comments_with_ids([cid])
+    expanded = [_expand_comment_record(rec, label) for rec in comments]
+
+    today = date.today().strftime("%Y-%m-%d")
+
+    return opts, val, expanded, f"Adding comment for: {label}", f" — {label}", today
 
 
+# ------------------------- Tab 1: Save comment -------------------------
 @app.callback(
     Output("t1-comments-table", "data", allow_duplicate=True),
     State("t1-athlete-table", "selected_rows"),
@@ -436,36 +440,131 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
 
     row = rows_json[selected_rows[0]]
     cid = int(row["_cid"])
-    label = row["Athlete"]
+    label = row["_athlete_label"]
 
     # Persist to SQLite (same DB used by training tab)
     td.db_add_comment(cid, label, date_str, text.strip())
 
-    # Build "By" from /me
-    by_who = ""
+    # User display (By:)
+    by_who = _get_signed_in_name()
+
+    comments = _db_list_comments_with_ids([cid])
+    expanded = [_expand_comment_record(rec, label, override_by=by_who, override_complaint=complaint) for rec in comments]
+    return expanded
+
+
+# ------------------------- Tab 1: Persist edits/deletes -------------------------
+@app.callback(
+    Output("t1-msg", "is_open", allow_duplicate=True),
+    Output("t1-msg", "children", allow_duplicate=True),
+    Input("t1-comments-table", "data_timestamp"),
+    State("t1-comments-table", "data"),
+    State("t1-comments-table", "data_previous"),
+    prevent_initial_call=True,
+)
+def t1_persist_comment_mutations(_ts, data, data_prev):
+    """
+    Detect row deletes or inline edits and update SQLite accordingly.
+    """
+    try:
+        if data_prev is None:
+            raise PreventUpdate
+
+        prev_by_id = {r["_id"]: r for r in data_prev if r.get("_id") is not None}
+        now_by_id  = {r["_id"]: r for r in data     if r.get("_id") is not None}
+
+        # Deletes: present before, missing now
+        deleted_ids = [cid for cid in prev_by_id.keys() if cid not in now_by_id]
+        for i in deleted_ids:
+            _db_delete_comment(i)
+
+        # Edits: present in both, comment text changed (you could also allow Date/Complaint edits similarly)
+        for cid, now in now_by_id.items():
+            before = prev_by_id.get(cid)
+            if not before:
+                continue
+            if (before.get("Comment") or "") != (now.get("Comment") or ""):
+                _db_update_comment_text(cid, now.get("Comment") or "")
+
+        if deleted_ids or any((prev_by_id.get(k, {}).get("Comment") or "") != (v.get("Comment") or "") for k, v in now_by_id.items()):
+            return True, "Comments updated."
+        else:
+            raise PreventUpdate
+    except Exception as e:
+        return True, f"Comment persistence error: {e}"
+
+
+# =========================
+# SQLite helpers (reuse td.DB_PATH)
+# =========================
+def _db_connect():
+    return sqlite3.connect(td.DB_PATH, check_same_thread=False)
+
+def _db_list_comments_with_ids(customer_ids):
+    conn = _db_connect(); cur = conn.cursor()
+    if customer_ids:
+        vals = [int(x) for x in customer_ids]
+        q = ",".join("?" for _ in vals)
+        cur.execute(f"""
+          SELECT id, date, comment, customer_label, customer_id, created_at
+          FROM comments
+          WHERE customer_id IN ({q})
+          ORDER BY date ASC, id ASC
+        """, vals)
+    else:
+        cur.execute("SELECT id, date, comment, customer_label, customer_id, created_at FROM comments ORDER BY date ASC, id ASC")
+    rows = cur.fetchall(); conn.close()
+    # return dicts
+    return [{
+        "_id": r[0],
+        "Date": r[1],
+        "Comment": r[2],
+        "Athlete": r[3],
+        "_cid": r[4],
+        "_created_at": r[5],
+    } for r in rows]
+
+def _db_delete_comment(comment_id: int):
+    conn = _db_connect(); cur = conn.cursor()
+    cur.execute("DELETE FROM comments WHERE id = ?", (int(comment_id),))
+    conn.commit(); conn.close()
+
+def _db_update_comment_text(comment_id: int, new_text: str):
+    conn = _db_connect(); cur = conn.cursor()
+    cur.execute("UPDATE comments SET comment = ? WHERE id = ?", (new_text, int(comment_id)))
+    conn.commit(); conn.close()
+
+def _expand_comment_record(rec, athlete_label, override_by=None, override_complaint=None):
+    """
+    Map raw DB row -> table row. We keep _id hidden for persistence.
+    """
+    return {
+        "_id": rec["_id"],
+        "Date": rec["Date"],
+        "By": override_by or "",            # we don’t store author; show current user on add
+        "Athlete": athlete_label,
+        "Complaint": override_complaint or "",
+        "Status": "",                       # wire up if/when a status column is stored
+        "Comment": rec["Comment"],
+    }
+
+def _get_signed_in_name():
+    """Get 'First Last' (fallback email) for the current user via /api/csiauth/me/."""
     try:
         token = auth.get_token()
-        if token:
-            headers = {"Authorization": f"Bearer {token}"}
-            r = requests.get(f"{SITE_URL}/api/csiauth/me/", headers=headers, timeout=5)
-            if r.status_code == 200:
-                js = r.json()
-                by_who = " ".join([js.get("first_name","").strip(), js.get("last_name","").strip()]).strip() or js.get("email","")
+        if not token:
+            return ""
+        headers = {"Authorization": f"Bearer {token}"}
+        r = requests.get(f"{SITE_URL}/api/csiauth/me/", headers=headers, timeout=5)
+        if r.status_code != 200:
+            return ""
+        js = r.json()
+        name = " ".join([js.get("first_name","").strip(), js.get("last_name","").strip()]).strip()
+        if not name:
+            name = js.get("email","")
+        return name or ""
     except Exception:
-        pass
-
-    comments_raw = td.db_list_comments([cid])
-    expanded = []
-    for c in comments_raw:
-        expanded.append({
-            "Date": c["Date"],
-            "By": by_who if by_who else "",
-            "Athlete": label,
-            "Complaint": complaint or "",
-            "Status": "",
-            "Comment": c["Comment"],
-        })
-    return expanded
+        return ""
 
 
 # ------------------------- Register Training tab callbacks -------------------------
