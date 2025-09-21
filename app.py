@@ -359,7 +359,6 @@ def _build_grid(rows):
          "cellRenderer": _html_renderer(), "filter":True, "sortable":True},
         {"headerName":"Complaints","field":"Complaints","flex":3, "cellRenderer": _pill_renderer()},
         {"headerName":"Last Appt","field":"Last Appt","flex":1, "filter":True, "sortable":True},
-        # hidden id for selection mapping
         {"headerName":"_cid","field":"_cid","hide":True},
     ]
     return dag.AgGrid(
@@ -380,14 +379,6 @@ def _build_grid(rows):
         style={"height":"520px","width":"100%"},
         dangerously_allow_code=True,
     )
-
-@dag.patch()
-def _pill_renderer():
-    pass
-
-@dag.patch()
-def _html_renderer():
-    pass
 
 @app.callback(
     Output("t1-grid-container", "children"),
@@ -527,7 +518,6 @@ def t1_fetch(n_clicks, group_values):
 def t1_set_complaints(selected_cid, rows_json):
     if not selected_cid or not rows_json:
         return [], None, _fmt_date(date.today()), "Select an athlete to add/view comments."
-    # Find that athlete's complaint list from our cached rows_json
     try:
         comp_list = []
         for r in rows_json:
@@ -556,19 +546,15 @@ def t1_save_comment(selected_cid, rows_json, complaint, date_str, text, me_json,
     if not selected_cid or not date_str or not (text or "").strip():
         raise PreventUpdate
 
-    # get label and status from cached rows
     label = f"ID {selected_cid}"
     status = ""
     if rows_json:
         for r in rows_json:
             if int(r.get("_cid")) == int(selected_cid):
                 label = r.get("Athlete") or label
-                # strip HTML from Current Status to get raw text for DB column
                 raw = r.get("Current Status") or ""
-                status = (
-                    str(raw).split("</span>", 1)[-1].strip()
-                    if "</span>" in str(raw) else str(raw)
-                )
+                status = (str(raw).split("</span>", 1)[-1].strip()
+                          if "</span>" in str(raw) else str(raw))
                 break
 
     author = ""
@@ -587,8 +573,6 @@ def t1_save_comment(selected_cid, rows_json, complaint, date_str, text, me_json,
         complaint=complaint or "",
         status=status or "",
     )
-
-    # Refresh table
     return list_comments_for_customer(int(selected_cid))
 
 # Also refresh comments grid when athlete changes (without saving)
