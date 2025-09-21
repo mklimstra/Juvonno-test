@@ -11,7 +11,7 @@ import traceback
 
 from dash_auth_external import DashAuthExternal
 from dash.exceptions import PreventUpdate
-from dash import Dash, Input, Output, html, dcc, no_update, dash_table, State, callback_context
+from dash import Dash, Input, Output, html, dcc, no_update, dash_table, State
 import dash_bootstrap_components as dbc
 
 from html import escape as html_escape
@@ -339,8 +339,11 @@ def t1_load_customers(n_clicks, group_values):
             status_html = f"{dot(status_color)}{html_escape(current_status) if current_status else '—'}" if current_status else "—"
 
             # Complaints pills
-            complaints = td.fetch_customer_complaints(cid)
-            complaint_names = [c["Title"] for c in complaints if c.get("Title")]
+            try:
+                complaints = td.fetch_customer_complaints(cid)
+                complaint_names = [c["Title"] for c in complaints if c.get("Title")]
+            except Exception:
+                complaint_names = []
             complaints_html = " ".join(
                 pill(t, color_for_label(t), border=BORDER) for t in complaint_names
             ) if complaint_names else "—"
@@ -412,7 +415,7 @@ def t1_load_customers(n_clicks, group_values):
         return no_update, no_update, msg, True
 
 
-# ------------------------- Tab 1: On select athlete -------------------------
+# ------------------------- Tab 1: On select athlete (robust against errors) -------------------------
 @app.callback(
     Output("t1-complaint-dd", "options"),
     Output("t1-complaint-dd", "value"),
@@ -424,30 +427,46 @@ def t1_load_customers(n_clicks, group_values):
     State("t1-rows-json", "data"),
 )
 def t1_on_select(selected_rows, rows_json):
-    if not rows_json:
-        raise PreventUpdate
-
     today = date.today().strftime("%Y-%m-%d")
 
-    if not selected_rows:
-        # no selection yet
-        return [], None, [], green_badge("Select an athlete above; comments will filter to that athlete."), "", today
+    try:
+        # No data yet
+        if not rows_json:
+            return [], None, [], green_badge("Select an athlete above; comments will filter to that athlete."), "", today
 
-    row = rows_json[selected_rows[0]]
-    cid = int(row["_cid"])
-    label = row["_athlete_label"]
+        # No selection
+        if not selected_rows:
+            return [], None, [], green_badge("Select an athlete above; comments will filter to that athlete."), "", today
 
-    # complaint options for dropdown
-    complaints = td.fetch_customer_complaints(cid)
-    names = [c["Title"] for c in complaints if c.get("Title")]
-    opts = [{"label": n, "value": n} for n in sorted(set(names))]
-    val = opts[0]["value"] if opts else None
+        idx = selected_rows[0]
+        if not isinstance(idx, int) or idx < 0 or idx >= len(rows_json):
+            # defensive: index out of range
+            return [], None, [], green_badge("Invalid selection. Please select a row again."), "", today
 
-    # existing comments for this athlete (with ids)
-    comments = _db_list_comments_with_ids([cid])
-    expanded = [_expand_comment_record(rec, label) for rec in comments]
+        row = rows_json[idx]
+        cid = int(row.get("_cid"))
+        label = row.get("_athlete_label") or f"ID {cid}"
 
-    return opts, val, expanded, green_badge(f"Adding comment for: {label}"), f" — {label}", today
+        # complaint options for dropdown (defensive: catch API issues)
+        try:
+            complaints = td.fetch_customer_complaints(cid)
+            names = [c.get("Title") for c in complaints if isinstance(c, dict) and c.get("Title")]
+        except Exception:
+            names = []
+        names = [n for n in names if isinstance(n, str) and n.strip()]
+        opts = [{"label": n, "value": n} for n in sorted(set(names))]
+        val = opts[0]["value"] if opts else None
+
+        # existing comments for this athlete (with ids)
+        comments = _db_list_comments_with_ids([cid])
+        expanded = [_expand_comment_record(rec, label) for rec in comments]
+
+        return opts, val, expanded, green_badge(f"Adding comment for: {label}"), f" — {label}", today
+
+    except Exception as e:
+        # Never let an exception bubble up to Dash (causes 500)
+        err = f"Selection error: {e}"
+        return [], None, [], green_badge(err), "", today
 
 
 # ------------------------- Tab 1: Save comment -------------------------
@@ -466,20 +485,24 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
     if not _n or not rows_json or not selected_rows or not date_str or not (text or "").strip():
         raise PreventUpdate
 
-    row = rows_json[selected_rows[0]]
-    cid = int(row["_cid"])
-    label = row["_athlete_label"]
+    try:
+        idx = selected_rows[0]
+        row = rows_json[idx]
+        cid = int(row["_cid"])
+        label = row["_athlete_label"]
 
-    # Persist to SQLite (same DB used by training tab)
-    td.db_add_comment(cid, label, date_str, text.strip())
+        # Persist to SQLite (same DB used by training tab)
+        td.db_add_comment(cid, label, date_str, text.strip())
 
-    # User display (By:)
-    by_who = _get_signed_in_name()
+        # User display (By:)
+        by_who = _get_signed_in_name()
 
-    comments = _db_list_comments_with_ids([cid])
-    expanded = [_expand_comment_record(rec, label, override_by=by_who, override_complaint=complaint) for rec in comments]
+        comments = _db_list_comments_with_ids([cid])
+        expanded = [_expand_comment_record(rec, label, override_by=by_who, override_complaint=complaint) for rec in comments]
 
-    return expanded, green_badge("Comment saved.")
+        return expanded, green_badge("Comment saved.")
+    except Exception as e:
+        return no_update, green_badge(f"Save error: {e}")
 
 
 # ------------------------- Tab 1: Persist edits/deletes -------------------------
@@ -526,7 +549,6 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
         else:
             raise PreventUpdate
     except Exception as e:
-        # still show in the same area, but as plain text (keeps UI simple)
         return f"Comment persistence error: {e}"
 
 
