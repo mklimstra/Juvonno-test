@@ -4,7 +4,7 @@ import math
 import json
 import hashlib
 import sqlite3
-from datetime import datetime, date
+from datetime import date
 import requests
 import pandas as pd
 import dash
@@ -168,6 +168,16 @@ def tab2_layout():
 
 
 # ------------------------- Page Layout -------------------------
+app = Dash(
+    __name__,
+    server=server,
+    external_stylesheets=[
+        dbc.themes.BOOTSTRAP,
+        "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css",
+    ],
+    suppress_callback_exceptions=True,
+)
+
 app.layout = html.Div([
     dcc.Location(id="redirect-to", refresh=True),
 
@@ -478,15 +488,17 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
         for i in deleted_ids:
             _db_delete_comment(i)
 
-        # Edits: present in both, comment text changed (you could also allow Date/Complaint edits similarly)
+        # Edits: present in both, comment text changed
+        any_edit = False
         for cid, now in now_by_id.items():
             before = prev_by_id.get(cid)
             if not before:
                 continue
             if (before.get("Comment") or "") != (now.get("Comment") or ""):
                 _db_update_comment_text(cid, now.get("Comment") or "")
+                any_edit = True
 
-        if deleted_ids or any((prev_by_id.get(k, {}).get("Comment") or "") != (v.get("Comment") or "") for k, v in now_by_id.items()):
+        if deleted_ids or any_edit:
             return True, "Comments updated."
         else:
             raise PreventUpdate
@@ -573,4 +585,5 @@ td.register_callbacks(app)
 
 # ------------------------- Main -------------------------
 if __name__ == "__main__":
-app.run(debug=False, port=8050)
+    # IMPORTANT: provide a body so the block is valid
+    app.run(debug=False, port=8050)
