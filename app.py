@@ -12,6 +12,9 @@ from dash.exceptions import PreventUpdate
 from dash import Dash, Input, Output, html, dcc, no_update, dash_table, State, callback_context
 import dash_bootstrap_components as dbc
 
+# stdlib HTML escape (fixes the error you saw)
+from html import escape as html_escape
+
 # Repo components & settings (same import style as the registration viewer)
 from layout import Footer, Navbar
 from settings import *  # expects AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLIENT_SECRET
@@ -57,7 +60,7 @@ def pill(text: str, bg=PILL_BG, fg="#111", border="#e3e6eb"):
         f'<span style="display:inline-block;padding:2px 8px;'
         f'border-radius:999px;background:{bg};color:{fg};'
         f'border:1px solid {border};font-size:12px;'
-        f'line-height:18px;white-space:nowrap;">{td.html.escape(text)}</span>'
+        f'line-height:18px;white-space:nowrap;">{html_escape(text)}</span>'
     )
 
 def dot(hex_color: str, size: int = 10, mr: int = 8) -> str:
@@ -284,7 +287,7 @@ def t1_load_customers(n_clicks, group_values):
                 current_status = str(df_full.iloc[-1]["Status"]) if not df_full.empty else ""
 
             status_color = td.PASTEL_COLOR.get(current_status, "#e6e6e6")
-            status_html = f"{dot(status_color)}{current_status or '—'}" if current_status else "—"
+            status_html = f"{dot(status_color)}{html_escape(current_status) if current_status else '—'}" if current_status else "—"
 
             # Complaints (from merged sources)
             complaints = td.fetch_customer_complaints(cid)
@@ -372,7 +375,6 @@ def t1_on_select(selected_rows, rows_json):
 
     # comments table for this athlete (from SQLite)
     comments_raw = td.db_list_comments([cid])
-    # expand to include complaint/status columns if possible (leave blank otherwise)
     expanded = []
     for c in comments_raw:
         expanded.append({
