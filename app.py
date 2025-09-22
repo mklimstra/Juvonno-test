@@ -37,6 +37,35 @@ try:
 except Exception:
     pass
 
+# ───────────────────────── Tabs styling (less-rounded pills, wrap when narrow) ─────────────────────────
+TABS_CONTAINER_STYLE = {
+    "display": "flex",
+    "gap": "6px",
+    "flexWrap": "wrap",      # side-by-side until the container gets too narrow, then wrap
+    "alignItems": "center",
+    "borderBottom": "0",
+    "marginBottom": "4px",
+}
+TAB_STYLE = {
+    "padding": "8px 14px",
+    "border": "1px solid #e9ecef",
+    "borderRadius": "8px",   # less round corners
+    "background": "#f8f9fb",
+    "color": "#495057",
+    "fontWeight": "500",
+    "flex": "0 0 auto",      # don't stretch; stay side-by-side
+}
+TAB_SELECTED_STYLE = {
+    "padding": "8px 14px",
+    "border": "1px solid #cfe2ff",
+    "borderRadius": "8px",   # less round corners (selected)
+    "background": "#e7f1ff",
+    "color": "#084298",
+    "fontWeight": "600",
+    "boxShadow": "inset 0 1px 0 rgba(255,255,255,.6)",
+    "flex": "0 0 auto",
+}
+
 # ───────────────────────── UI helpers (pills/dots/colors) ─────────────────────────
 PILL_BG_DEFAULT = "#eef2f7"
 PALETTE = ["#e7f0ff", "#fde2cf", "#e6f3e6", "#f3e6f7", "#fff3cd", "#e0f7fa", "#fbe7eb", "#e7f5ff"]
@@ -76,13 +105,13 @@ def status_pill_component(text: str, kind: str = "success"):
         style = {
             "display": "inline-block", "padding": "2px 8px", "borderRadius": "999px",
             "background": "#fdecea", "color": "#842029", "border": "1px solid #f5c2c7",
-            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
+            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
         }
     else:
         style = {
             "display": "inline-block", "padding": "2px 8px", "borderRadius": "999px",
             "background": "#eef2f7", "color": "#111", "border": "1px solid #cfd6de",
-            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
+            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
         }
     return html.Span(text, style=style)
 
@@ -190,16 +219,17 @@ def tab1_layout():
                 dash_table.DataTable(
                     id="t1-comments-table",
                     columns=[
-                        {"name":"Date","id":"Date"},
-                        {"name":"By","id":"By"},
-                        {"name":"Athlete","id":"Athlete"},
-                        {"name":"Complaint","id":"Complaint"},
-                        {"name":"Status","id":"Status"},
-                        {"name":"Comment","id":"Comment", "editable": True},
-                        {"name":"_id","id":"_id", "hidden": True},
+                        {"name":"Date","id":"Date", "editable": False},
+                        {"name":"By","id":"By", "editable": False},
+                        {"name":"Athlete","id":"Athlete", "editable": False},
+                        {"name":"Complaint","id":"Complaint", "editable": False},
+                        {"name":"Status","id":"Status", "editable": False},
+                        {"name":"Comment","id":"Comment", "editable": True},   # ONLY this column editable
+                        {"name":"_id","id":"_id", "hidden": True, "editable": False},
                     ],
                     data=[],
                     row_deletable=True,
+                    # Keep table-level editable True so the per-column flags control what can change
                     editable=True,
                     page_action="none",
                     style_table={"overflowX":"auto","maxHeight":"240px","overflowY":"auto"},
@@ -227,33 +257,6 @@ app = Dash(
     suppress_callback_exceptions=True,
 )
 
-# >>> Minimal, nice-looking pill tabs (only change is here) <<<
-TABS_CONTAINER_STYLE = {
-    "display": "flex",
-    "gap": "6px",
-    "flexWrap": "wrap",
-    "borderBottom": "0",
-    "marginBottom": "4px"
-}
-TAB_STYLE = {
-    "padding": "8px 14px",
-    "border": "1px solid #e9ecef",
-    "borderRadius": "999px",
-    "background": "#f8f9fb",
-    "color": "#495057",
-    "fontWeight": "500",
-    "marginRight": "0",
-}
-TAB_SELECTED_STYLE = {
-    "padding": "8px 14px",
-    "border": "1px solid #cfe2ff",
-    "borderRadius": "999px",
-    "background": "#e7f1ff",
-    "color": "#084298",
-    "fontWeight": "600",
-    "boxShadow": "inset 0 1px 0 rgba(255,255,255,.6)"
-}
-
 app.layout = html.Div([
     dcc.Location(id="redirect-to", refresh=True),
     dcc.Interval(id="init-interval", interval=500, n_intervals=0, max_intervals=1),
@@ -265,22 +268,13 @@ app.layout = html.Div([
         dcc.Tabs(
             id="main-tabs",
             value="tab-1",
-            style=TABS_CONTAINER_STYLE,            # container styling
-            parent_style={"border": "0"},          # remove default underline border
             children=[
-                dcc.Tab(
-                    label="Athlete Status",
-                    value="tab-1",
-                    style=TAB_STYLE,
-                    selected_style=TAB_SELECTED_STYLE,
-                ),
-                dcc.Tab(
-                    label="Status History",
-                    value="tab-2",
-                    style=TAB_STYLE,
-                    selected_style=TAB_SELECTED_STYLE,
-                ),
+                dcc.Tab(label="Athlete Status", value="tab-1", style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
+                dcc.Tab(label="Status History", value="tab-2", style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
             ],
+            # Apply container style (both style & parent_style for broad compatibility)
+            style=TABS_CONTAINER_STYLE,
+            parent_style=TABS_CONTAINER_STYLE,
         ),
         html.Div(id="tabs-content", className="mt-3"),
     ], fluid=True),
