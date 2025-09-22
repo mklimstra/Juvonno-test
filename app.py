@@ -37,37 +37,42 @@ try:
 except Exception:
     pass
 
-# ───────────────────────── Tabs styling (less-rounded pills, wrap when narrow) ─────────────────────────
+# ───────────────────────── Styles (tabs & pills) ─────────────────────────
 TABS_CONTAINER_STYLE = {
-    "display": "flex",
+    "display": "flex",            # keep horizontal
     "gap": "6px",
-    "flexWrap": "wrap",      # side-by-side until the container gets too narrow, then wrap
     "alignItems": "center",
     "borderBottom": "0",
     "marginBottom": "4px",
+    "width": "100%",
 }
+
 TAB_STYLE = {
     "padding": "8px 14px",
     "border": "1px solid #e9ecef",
-    "borderRadius": "8px",   # less round corners
+    "borderRadius": "8px",
     "background": "#f8f9fb",
     "color": "#495057",
     "fontWeight": "500",
-    "flex": "0 0 auto",      # don't stretch; stay side-by-side
+    "flex": "1 1 0%",             # stretch across the row
+    "textAlign": "center",
 }
+
 TAB_SELECTED_STYLE = {
     "padding": "8px 14px",
     "border": "1px solid #cfe2ff",
-    "borderRadius": "8px",   # less round corners (selected)
+    "borderRadius": "8px",
     "background": "#e7f1ff",
     "color": "#084298",
     "fontWeight": "600",
     "boxShadow": "inset 0 1px 0 rgba(255,255,255,.6)",
-    "flex": "0 0 auto",
+    "flex": "1 1 0%",
+    "textAlign": "center",
 }
 
 # ───────────────────────── UI helpers (pills/dots/colors) ─────────────────────────
 PILL_BG_DEFAULT = "#eef2f7"
+PILL_BORDER_RADIUS = "6px"  # less rounded corners
 PALETTE = ["#e7f0ff", "#fde2cf", "#e6f3e6", "#f3e6f7", "#fff3cd", "#e0f7fa", "#fbe7eb", "#e7f5ff"]
 BORDER = "#cfd6de"
 
@@ -82,7 +87,7 @@ def pill_html(text: str, bg=None, fg="#111", border=BORDER) -> str:
     bg = bg or PILL_BG_DEFAULT
     return (
         f'<span style="display:inline-block;padding:2px 8px;'
-        f'border-radius:999px;background:{bg};color:{fg};'
+        f'border-radius:{PILL_BORDER_RADIUS};background:{bg};color:{fg};'
         f'border:1px solid {border};font-size:12px;'
         f'line-height:18px;white-space:nowrap;">{html_escape(text)}</span>'
     )
@@ -97,21 +102,21 @@ def dot_html(hex_color: str, size: int = 10, mr: int = 8) -> str:
 def status_pill_component(text: str, kind: str = "success"):
     if kind == "success":
         style = {
-            "display": "inline-block", "padding": "2px 8px", "borderRadius": "999px",
+            "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
             "background": "#e9f7ef", "color": "#0f5132", "border": "1px solid #badbcc",
             "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
         }
     elif kind == "danger":
         style = {
-            "display": "inline-block", "padding": "2px 8px", "borderRadius": "999px",
+            "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
             "background": "#fdecea", "color": "#842029", "border": "1px solid #f5c2c7",
-            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
+            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
         }
     else:
         style = {
-            "display": "inline-block", "padding": "2px 8px", "borderRadius": "999px",
+            "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
             "background": "#eef2f7", "color": "#111", "border": "1px solid #cfd6de",
-            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
+            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
         }
     return html.Span(text, style=style)
 
@@ -224,13 +229,12 @@ def tab1_layout():
                         {"name":"Athlete","id":"Athlete", "editable": False},
                         {"name":"Complaint","id":"Complaint", "editable": False},
                         {"name":"Status","id":"Status", "editable": False},
-                        {"name":"Comment","id":"Comment", "editable": True},   # ONLY this column editable
+                        {"name":"Comment","id":"Comment", "editable": True},   # ONLY this is editable
                         {"name":"_id","id":"_id", "hidden": True, "editable": False},
                     ],
                     data=[],
                     row_deletable=True,
-                    # Keep table-level editable True so the per-column flags control what can change
-                    editable=True,
+                    editable=False,   # column-level 'editable' overrides; keep others locked
                     page_action="none",
                     style_table={"overflowX":"auto","maxHeight":"240px","overflowY":"auto"},
                     style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","lineHeight":"22px"},
@@ -269,12 +273,14 @@ app.layout = html.Div([
             id="main-tabs",
             value="tab-1",
             children=[
-                dcc.Tab(label="Athlete Status", value="tab-1", style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
-                dcc.Tab(label="Status History", value="tab-2", style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
+                dcc.Tab(label="Athlete Status", value="tab-1",
+                        style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
+                dcc.Tab(label="Status History", value="tab-2",
+                        style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
             ],
-            # Apply container style (both style & parent_style for broad compatibility)
-            style=TABS_CONTAINER_STYLE,
-            parent_style=TABS_CONTAINER_STYLE,
+            style=TABS_CONTAINER_STYLE,         # horizontal tab bar
+            parent_style={"width": "100%"},
+            mobile_breakpoint=0,                # never stack vertically
         ),
         html.Div(id="tabs-content", className="mt-3"),
     ], fluid=True),
@@ -535,6 +541,7 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
             before = prev_by_id.get(cid)
             if not before:
                 continue
+            # Only Comment is editable; check and persist if changed
             if (before.get("Comment") or "") != (now.get("Comment") or ""):
                 _db_update_comment_text(cid, now.get("Comment") or "")
                 any_edit = True
