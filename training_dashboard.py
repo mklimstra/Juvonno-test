@@ -85,6 +85,17 @@ def fetch_customers_full() -> Dict[int, Dict]:
         page += 1
     return {c["id"]: c for c in out if c.get("id")}
 
+# NEW: detail fetch (for DOB, phone, etc.) with cache
+@functools.lru_cache(maxsize=4096)
+def fetch_customer_detail(customer_id: int) -> Dict:
+    try:
+        js = _get(f"customers/{int(customer_id)}", include="full")
+        if isinstance(js, dict):
+            return js.get("customer", js)
+    except Exception:
+        pass
+    return {}
+
 _require_api_key()
 CUSTOMERS = fetch_customers_full()
 
@@ -187,6 +198,20 @@ def list_complaints_for_appt(aid: int) -> List[Dict]:
     if isinstance(js, dict) and isinstance(js.get("list"), list): return js["list"]
     return []
 
+# ── Complaint detail for enrichment (fills Onset/Priority/Status if missing)
+@functools.lru_cache(maxsize=4096)
+def fetch_complaint_detail(complaint_id: int) -> Dict:
+    try:
+        js = _get(f"complaints/{int(complaint_id)}", include="full")
+        if isinstance(js, dict):
+            # API may wrap
+            if "complaint" in js and isinstance(js["complaint"], dict):
+                return js["complaint"]
+            return js
+    except Exception:
+        pass
+    return {}
+
 # ── Athlete-level complaints (merge) ──────────
 def _fmt_date(val) -> str:
     if not val: return ""
@@ -208,6 +233,21 @@ def _norm_complaint_fields(rec: Dict) -> Dict:
     status   = (rec.get("status") or rec.get("status_name") or rec.get("statusName") or
                 rec.get("state") or rec.get("complaint_status") or "")
     cid      = rec.get("id") or rec.get("complaint_id") or rec.get("complaintId") or None
+
+    # Enrich if sparse and we have an id
+    if (not onset or not priority or not status) and cid:
+        detail = fetch_complaint_detail(int(cid))
+        if isinstance(detail, dict):
+            onset2 = (detail.get("onset_date") or detail.get("onsetDate") or detail.get("start_date") or
+                      detail.get("date") or detail.get("injury_onset") or "")
+            priority2 = (detail.get("priority") or detail.get("priority_name") or detail.get("priorityName") or
+                         detail.get("priority_level") or "")
+            status2   = (detail.get("status") or detail.get("status_name") or detail.get("statusName") or
+                         detail.get("state") or detail.get("complaint_status") or "")
+            onset    = onset or onset2
+            priority = str(priority or priority2).strip()
+            status   = str(status or status2).strip()
+
     return {"Id": cid, "Title": title, "Onset": _fmt_date(onset),
             "Priority": str(priority).strip(), "Status": (str(status).strip() or "—")}
 
@@ -231,6 +271,7 @@ def fetch_customer_complaints(customer_id: int) -> List[Dict]:
     except requests.HTTPError:
         pass
 
+    # 2) Global search by customer_id
     try:
         page = 1
         while True:
@@ -243,7 +284,7 @@ def fetch_customer_complaints(customer_id: int) -> List[Dict]:
     except requests.HTTPError:
         pass
 
-    # 2) Appointment-level + 3) Inline appointment complaint
+    # 3) Appointment-level + inline
     for ap in CID_TO_APPTS.get(customer_id, []):
         for rec in list_complaints_for_appt(ap.get("id")):
             out.append(rec)
@@ -256,7 +297,7 @@ def fetch_customer_complaints(customer_id: int) -> List[Dict]:
     normed = [_norm_complaint_fields(r) for r in out if isinstance(r, dict)]
     dedup: Dict[Tuple, Dict] = {}
     for r in normed:
-        key = (r.get("Id") or r.get("Title").casefold(),)
+        key = (r.get("Id") or (r.get("Title") or "").casefold(),)
         if key in dedup:
             prev = dedup[key]
             for f in ("Priority", "Status", "Onset", "Title"):
@@ -626,27 +667,24 @@ def register_callbacks(app: dash.Dash):
             fig_cal.update_xaxes(tickfont=dict(color="#111111"))
             fig_cal.update_yaxes(tickfont=dict(color="#111111"))
 
-            # Abbreviate month names in all annotation texts (robust)
+            # Abbreviate month names in all annotation texts (robust rewrite)
             MONTHS = {
                 "January":"Jan","February":"Feb","March":"Mar","April":"Apr","May":"May","June":"Jun",
                 "July":"Jul","August":"Aug","September":"Sep","October":"Oct","November":"Nov","December":"Dec"
             }
             month_pattern = re.compile(r"\b(" + "|".join(MONTHS.keys()) + r")\b")
-            anns = list(getattr(fig_cal.layout, "annotations", []) or [])
-            changed = False
-            for ann in anns:
+            new_annotations = []
+            for ann in (fig_cal.layout.annotations or []):
                 try:
-                    txt = str(getattr(ann, "text", ""))
-                    if not txt:
-                        continue
-                    new_txt = month_pattern.sub(lambda m: MONTHS[m.group(1)], txt)
-                    if new_txt != txt:
-                        ann.text = new_txt
-                        changed = True
+                    jd = ann.to_plotly_json()
+                    txt = str(jd.get("text", "") or "")
+                    if txt:
+                        jd["text"] = month_pattern.sub(lambda m: MONTHS[m.group(1)], txt)
+                    new_annotations.append(jd)
                 except Exception:
-                    pass
-            if changed:
-                fig_cal.layout.annotations = tuple(anns)
+                    new_annotations.append(ann)
+            if new_annotations:
+                fig_cal.update_layout(annotations=new_annotations)
 
             cal_graph = dcc.Graph(id="cal-graph", figure=fig_cal, config={"displayModeBar": False})
             return cal_graph, table, "", False
@@ -669,13 +707,22 @@ def register_callbacks(app: dash.Dash):
         if not cid or cid not in CUSTOMERS:
             return html.Div("Select an athlete to see demographics, current status, and complaints.", className="text-muted")
 
-        cust = CUSTOMERS[cid]
-        label = f"{cust.get('first_name','')} {cust.get('last_name','')} (ID {cid})".strip()
+        # Merge list row + detail row so DOB & friends are present
+        cust_list = CUSTOMERS.get(cid, {})
+        cust_full = fetch_customer_detail(cid) or {}
+        def _first_nonempty(*vals):
+            for v in vals:
+                if isinstance(v, str) and v.strip(): return v.strip()
+            return ""
 
-        dob   = cust.get("dob") or cust.get("birthdate") or ""
-        sex   = cust.get("sex") or cust.get("gender") or ""
-        email = cust.get("email") or ""
-        phone = cust.get("phone") or cust.get("mobile") or ""
+        first = _first_nonempty(cust_full.get("first_name"), cust_list.get("first_name"))
+        last  = _first_nonempty(cust_full.get("last_name"),  cust_list.get("last_name"))
+        label = f"{first} {last} (ID {cid})".strip()
+
+        dob   = _first_nonempty(cust_full.get("dob"), cust_full.get("birthdate"), cust_list.get("dob"), cust_list.get("birthdate"))
+        sex   = _first_nonempty(cust_full.get("sex"), cust_full.get("gender"), cust_list.get("sex"), cust_list.get("gender"))
+        email = _first_nonempty(cust_full.get("email"), cust_list.get("email"))
+        phone = _first_nonempty(cust_full.get("phone"), cust_full.get("mobile"), cust_list.get("phone"), cust_list.get("mobile"))
 
         chips = [html.Span(g.title(), className="badge bg-light text-dark me-1 mb-1",
                            style={"border":"1px solid #e3e6eb"}) for g in CID_TO_GROUPS.get(cid, [])]
@@ -711,8 +758,8 @@ def register_callbacks(app: dash.Dash):
         # Complaints table with Onset / Priority / Status
         complaints = fetch_customer_complaints(cid)
         if complaints:
-            comp_rows = [{"Title": c["Title"], "Onset": c["Onset"], "Priority": c["Priority"], "Status": c["Status"]}
-                         for c in complaints]
+            comp_rows = [{"Title": c.get("Title",""), "Onset": c.get("Onset",""),
+                          "Priority": c.get("Priority",""), "Status": c.get("Status","")} for c in complaints]
             comp_table = dash_table.DataTable(
                 columns=[{"name":"Title","id":"Title"},
                          {"name":"Onset","id":"Onset"},
