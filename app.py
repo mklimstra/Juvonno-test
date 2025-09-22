@@ -143,7 +143,7 @@ def _get_signed_in_name() -> str:
 # ───────────────────────── Tab 1 (Overview) ─────────────────────────
 def tab1_layout():
     return dbc.Container([
-        html.H3("Overview", className="mt-2"),
+        html.H3("Athlete Status", className="mt-2"),
 
         dbc.Row([
             dbc.Col(dcc.Dropdown(
