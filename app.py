@@ -1,34 +1,24 @@
 # app.py
-import os
-import math
-import json
-import hashlib
-import sqlite3
+import os, hashlib, base64, sqlite3, traceback
 from datetime import date
+from html import escape as html_escape
+
 import requests
 import pandas as pd
 import dash
-import traceback
-
 from dash_auth_external import DashAuthExternal
+from dash import Dash, Input, Output, State, html, dcc, dash_table, no_update
 from dash.exceptions import PreventUpdate
-from dash import Dash, Input, Output, html, dcc, no_update, dash_table, State
 import dash_bootstrap_components as dbc
-
-from html import escape as html_escape
 
 # Repo components & settings
 from layout import Footer, Navbar
 from settings import *  # AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLIENT_SECRET
+import training_dashboard as td  # reuse groups, API access, DB path, etc.
 
-# Training tab (unchanged logic & JUV API calls)
-import training_dashboard as td
-
-
-# ------------------------- Auth / Server -------------------------
+# ───────────────────────── Auth / Server ─────────────────────────
 auth = DashAuthExternal(
-    AUTH_URL,
-    TOKEN_URL,
+    AUTH_URL, TOKEN_URL,
     app_url=APP_URL,
     client_id=CLIENT_ID,
     client_secret=CLIENT_SECRET
@@ -41,49 +31,15 @@ assets_path = os.path.join(here, "assets")
 server.static_folder = assets_path
 server.static_url_path = "/assets"
 
-# Ensure the comments DB exists and migrate schema to include 'complaint'
-def _ensure_db_and_migrate():
-    # create DB/table if needed (re-use td._db)
-    try:
-        conn = sqlite3.connect(td.DB_PATH, check_same_thread=False)
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS comments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                customer_id INTEGER,
-                customer_label TEXT,
-                date TEXT,
-                comment TEXT,
-                created_at TEXT
-            )
-        """)
-        # add complaint column if missing
-        cur.execute("PRAGMA table_info(comments)")
-        cols = [r[1] for r in cur.fetchall()]
-        if "complaint" not in cols:
-            cur.execute("ALTER TABLE comments ADD COLUMN complaint TEXT")
-        conn.commit()
-    finally:
-        try: conn.close()
-        except Exception: pass
+# Ensure the SQLite table exists on first run (so first comment works).
+try:
+    td._db().close()
+except Exception:
+    pass
 
-_ensure_db_and_migrate()
-
-
-# ------------------------- Small helpers (pills/dots/colors) -------------------------
+# ───────────────────────── UI helpers (pills/dots/colors) ─────────────────────────
 PILL_BG_DEFAULT = "#eef2f7"
-
-# soft pastel palette; stable selection via md5(text) % len(PALETTE)
-PALETTE = [
-    "#e7f0ff",  # blue-ish
-    "#fde2cf",  # peach
-    "#e6f3e6",  # green-ish
-    "#f3e6f7",  # purple-ish
-    "#fff3cd",  # soft yellow
-    "#e0f7fa",  # cyan-ish
-    "#fbe7eb",  # pink-ish
-    "#e7f5ff",  # light blue
-]
+PALETTE = ["#e7f0ff", "#fde2cf", "#e6f3e6", "#f3e6f7", "#fff3cd", "#e0f7fa", "#fbe7eb", "#e7f5ff"]
 BORDER = "#cfd6de"
 
 def color_for_label(text: str) -> str:
@@ -93,7 +49,7 @@ def color_for_label(text: str) -> str:
     idx = int(h[:8], 16) % len(PALETTE)
     return PALETTE[idx]
 
-def pill(text: str, bg=None, fg="#111", border=BORDER):
+def pill_html(text: str, bg=None, fg="#111", border=BORDER) -> str:
     bg = bg or PILL_BG_DEFAULT
     return (
         f'<span style="display:inline-block;padding:2px 8px;'
@@ -102,33 +58,89 @@ def pill(text: str, bg=None, fg="#111", border=BORDER):
         f'line-height:18px;white-space:nowrap;">{html_escape(text)}</span>'
     )
 
-def dot(hex_color: str, size: int = 10, mr: int = 8) -> str:
+def dot_html(hex_color: str, size: int = 10, mr: int = 8) -> str:
     return (
         f'<span style="display:inline-block;width:{size}px;height:{size}px;'
         f'border-radius:50%;background:{hex_color};margin-right:{mr}px;'
         f'border:1px solid rgba(0,0,0,.25)"></span>'
     )
 
-def status_badge(text: str):
-    if not text:
+def status_pill_component(text: str, kind: str = "success"):
+    if kind == "success":
+        style = {
+            "display": "inline-block", "padding": "2px 8px", "borderRadius": "999px",
+            "background": "#e9f7ef", "color": "#0f5132", "border": "1px solid #badbcc",
+            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
+        }
+    elif kind == "danger":
+        style = {
+            "display": "inline-block", "padding": "2px 8px", "borderRadius": "999px",
+            "background": "#fdecea", "color": "#842029", "border": "1px solid #f5c2c7",
+            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
+        }
+    else:
+        style = {
+            "display": "inline-block", "padding": "2px 8px", "borderRadius": "999px",
+            "background": "#eef2f7", "color": "#111", "border": "1px solid #cfd6de",
+            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
+        }
+    return html.Span(text, style=style)
+
+# ───────────────────────── Signed-in name helpers ─────────────────────────
+def _b64url_decode(part: str) -> bytes:
+    part = part + '=' * (-len(part) % 4)
+    return base64.urlsafe_b64decode(part.encode("utf-8"))
+
+def _name_from_jwt(token: str) -> str:
+    try:
+        parts = token.split(".")
+        if len(parts) < 2: return ""
+        payload = _b64url_decode(parts[1]).decode("utf-8")
+        js = __import__("json").loads(payload)
+        first = (js.get("given_name") or js.get("first_name") or "").strip()
+        last  = (js.get("family_name") or js.get("last_name") or "").strip()
+        name  = (f"{first} {last}").strip() or js.get("name") or ""
+        if not name:
+            name = js.get("preferred_username") or js.get("email") or ""
+        return name
+    except Exception:
         return ""
-    return html.Span(
-        text,
-        style={
-            "display": "inline-block",
-            "padding": "2px 8px",
-            "borderRadius": "999px",
-            "background": "#e9f7ef",  # light green
-            "color": "#0f5132",
-            "border": "1px solid #badbcc",
-            "fontSize": "12px",
-            "lineHeight": "18px",
-            "whiteSpace": "nowrap",
-        },
-    )
 
+def _get_signed_in_name() -> str:
+    try:
+        token = auth.get_token()
+        if not token:
+            return ""
+        # Try Bearer
+        try:
+            r = requests.get(f"{SITE_URL}/api/csiauth/me/",
+                             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                             timeout=5)
+            if r.status_code == 200:
+                js = r.json()
+                first = (js.get("first_name") or "").strip()
+                last  = (js.get("last_name") or "").strip()
+                name = f"{first} {last}".strip() or js.get("email", "")
+                if name: return name
+        except Exception:
+            pass
+        # Try query param
+        try:
+            r2 = requests.get(f"{SITE_URL}/api/csiauth/me/", params={"access_token": token}, timeout=5)
+            if r2.status_code == 200:
+                js = r2.json()
+                first = (js.get("first_name") or "").strip()
+                last  = (js.get("last_name") or "").strip()
+                name = f"{first} {last}".strip() or js.get("email", "")
+                if name: return name
+        except Exception:
+            pass
+        # JWT decode fallback
+        return _name_from_jwt(token) or ""
+    except Exception:
+        return ""
 
-# ------------------------- Tab 1 (Overview) Layout -------------------------
+# ───────────────────────── Tab 1 (Overview) ─────────────────────────
 def tab1_layout():
     return dbc.Container([
         html.H3("Overview", className="mt-2"),
@@ -136,7 +148,7 @@ def tab1_layout():
         dbc.Row([
             dbc.Col(dcc.Dropdown(
                 id="t1-group-dd",
-                options=td.GROUP_OPTS,  # reuse groups computed in training_dashboard
+                options=td.GROUP_OPTS,
                 multi=True,
                 placeholder="Select patient group(s)…"
             ), md=6),
@@ -145,37 +157,33 @@ def tab1_layout():
 
         dbc.Alert(id="t1-msg", is_open=False, color="danger"),
 
-        # main table
         html.Div(id="t1-grid-container"),
         dcc.Store(id="t1-rows-json", data=[]),
 
         html.Hr(),
 
-        # Comments section bound to the selected row in the table
         dbc.Card([
             dbc.CardHeader([
                 html.Span("Comments", className="me-2"),
                 html.Span(id="t1-selected-athlete-label", className="fw-semibold text-muted")
             ]),
             dbc.CardBody([
-
-                # Two-column layout: big textarea (left ~2/3), controls stacked (right ~1/3)
                 dbc.Row([
-                    dbc.Col([
-                        dcc.Textarea(
-                            id="t1-comment-text",
-                            placeholder="Add a note about the selected athlete…",
-                            style={"width":"100%","height":"140px"}
-                        ),
-                    ], md=8),
-
+                    dbc.Col(dcc.Textarea(
+                        id="t1-comment-text",
+                        placeholder="Add a note about the selected athlete…",
+                        style={"width":"100%","height":"110px"}
+                    ), md=8),
                     dbc.Col([
                         dcc.DatePickerSingle(id="t1-comment-date", display_format="YYYY-MM-DD", style={"width":"100%"}),
-                        html.Div(dcc.Dropdown(id="t1-complaint-dd", placeholder="Pick a complaint (optional)…", style={"width":"100%"}),
-                                 className="mt-2"),
-                        dbc.Button("Save Comment", id="t1-save-comment", color="success", className="mt-2 w-100"),
+                        dcc.Dropdown(id="t1-complaint-dd", placeholder="Pick a complaint (optional)…",
+                                     style={"width":"100%","marginTop":"6px"}),
+                        dbc.Button("Save Comment", id="t1-save-comment", color="success",
+                                   className="w-100", style={"marginTop":"6px"}),
                     ], md=4),
                 ], className="g-2"),
+
+                html.Div(id="t1-comment-status", className="mt-2"),
 
                 html.Hr(),
 
@@ -187,8 +195,8 @@ def tab1_layout():
                         {"name":"Athlete","id":"Athlete"},
                         {"name":"Complaint","id":"Complaint"},
                         {"name":"Status","id":"Status"},
-                        {"name":"Comment","id":"Comment", "editable": True},  # only editable column
-                        {"name":"_id","id":"_id", "hidden": True},            # hidden key
+                        {"name":"Comment","id":"Comment", "editable": True},
+                        {"name":"_id","id":"_id", "hidden": True},
                     ],
                     data=[],
                     row_deletable=True,
@@ -200,124 +208,73 @@ def tab1_layout():
                                 "fontFamily":"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
                                 "textAlign":"left"},
                     style_data={"borderBottom":"1px solid #eceff4"},
-                    style_data_conditional=[
-                        {"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"},
-                        {"if": {"state": "selected"}, "backgroundColor": "#fdecea"},
-                    ],
+                    style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
                 ),
-
-                # slim status badge at the very bottom
-                html.Div(id="t1-comment-status", className="mt-2"),
             ])
         ], className="mb-4"),
-
     ], fluid=True)
 
-
-# ------------------------- Tab 2 (Training Dashboard) Layout -------------------------
+# ───────────────────────── Tab 2 (Training Dashboard) ─────────────────────────
 def tab2_layout():
     return td.layout_body()
 
-
-# ------------------------- Page Layout -------------------------
+# ───────────────────────── App shell ─────────────────────────
 app = Dash(
     __name__,
     server=server,
-    external_stylesheets=[
-        dbc.themes.BOOTSTRAP,
-        "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css",
-    ],
+    external_stylesheets=[dbc.themes.BOOTSTRAP,
+                          "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css"],
     suppress_callback_exceptions=True,
 )
 
 app.layout = html.Div([
     dcc.Location(id="redirect-to", refresh=True),
-
-    # one-time init for login / redirect
     dcc.Interval(id="init-interval", interval=500, n_intervals=0, max_intervals=1),
-
-    # user badge refresh (signed-in name) every 60s
     dcc.Interval(id="user-refresh", interval=60_000, n_intervals=0),
 
-    # Navbar with right-slot for user label
-    Navbar([
-        html.Span(id="navbar-user", className="text-white-50 small", children="")
-    ]).render(),
+    Navbar([html.Span(id="navbar-user", className="text-white-50 small", children="")]).render(),
 
     dbc.Container([
-        dcc.Tabs(
-            id="main-tabs",
-            value="tab-1",
-            children=[
-                dcc.Tab(label="Overview", value="tab-1"),
-                dcc.Tab(label="Training Dashboard", value="tab-2"),
-            ],
-        ),
+        dcc.Tabs(id="main-tabs", value="tab-1",
+                 children=[dcc.Tab(label="Overview", value="tab-1"),
+                           dcc.Tab(label="Training Dashboard", value="tab-2")]),
         html.Div(id="tabs-content", className="mt-3"),
     ], fluid=True),
 
     Footer().render(),
 ])
 
-
-# ------------------------- Tab switcher -------------------------
-@app.callback(
-    Output("tabs-content", "children"),
-    Input("main-tabs", "value"),
-)
+# ───────────────────────── Tab switcher ─────────────────────────
+@app.callback(Output("tabs-content", "children"), Input("main-tabs", "value"))
 def render_tab(which):
     return tab1_layout() if which == "tab-1" else tab2_layout()
 
-
-# ------------------------- Auth / Navbar user & login redirect -------------------------
+# ───────────────────────── Login redirect & navbar user ─────────────────────────
 @app.callback(
     Output("redirect-to", "href"),
     Input("init-interval", "n_intervals"),
     State("redirect-to", "pathname"),
 )
 def initial_view(n, pathname):
-    """
-    Redirect to /login only when no token AND we are not already on /login.
-    This prevents the reload loop on the /login page.
-    """
     try:
         token = auth.get_token()
     except Exception:
         token = None
-
     if token:
         return no_update
-
     if (pathname or "").rstrip("/") == "/login":
         return no_update
-
     return "login"
 
-
-@app.callback(
-    Output("navbar-user", "children"),
-    Input("user-refresh", "n_intervals"),
-)
+@app.callback(Output("navbar-user", "children"), Input("user-refresh", "n_intervals"))
 def refresh_user_badge(_n):
-    """Show 'Signed in as: First Last' once token is present; otherwise show 'Sign in'."""
     try:
-        token = auth.get_token()
-        if not token:
-            return html.A("Sign in", href="login", className="link-light")
-        headers = {"Authorization": f"Bearer {token}"}
-        resp = requests.get(f"{SITE_URL}/api/csiauth/me/", headers=headers, timeout=5)
-        if resp.status_code != 200:
-            return html.A("Sign in", href="login", className="link-light")
-        js = resp.json()
-        name = " ".join([js.get("first_name","").strip(), js.get("last_name","").strip()]).strip()
-        if not name:
-            name = js.get("email","")
-        return f"Signed in as: {name or 'Unknown user'}"
+        name = _get_signed_in_name()
+        return f"Signed in as: {name}" if name else html.A("Sign in", href="login", className="link-light")
     except Exception:
         return html.A("Sign in", href="login", className="link-light")
 
-
-# ------------------------- Tab 1: Load Customers -------------------------
+# ───────────────────────── Tab 1: Load customers ─────────────────────────
 @app.callback(
     Output("t1-grid-container", "children"),
     Output("t1-rows-json", "data"),
@@ -333,8 +290,8 @@ def t1_load_customers(n_clicks, group_values):
             return no_update, no_update, "Select at least one group.", True
 
         targets = {td._norm(g) for g in group_values}
-
         rows = []
+
         for cid, cust in td.CUSTOMERS.items():
             cust_groups = set(td.CID_TO_GROUPS.get(cid, []))
             if not (targets & cust_groups):
@@ -343,12 +300,11 @@ def t1_load_customers(n_clicks, group_values):
             first = (cust.get("first_name") or "").strip()
             last  = (cust.get("last_name") or "").strip()
 
-            # colorful pills per group
             groups_html = " ".join(
-                pill(g.title(), color_for_label(g)) for g in sorted(cust_groups)
+                pill_html(g.title(), color_for_label(g)) for g in sorted(cust_groups)
             ) if cust_groups else "—"
 
-            # Current training status (forward-fill)
+            # Current training status (ffill)
             appts = td.CID_TO_APPTS.get(cid, [])
             status_rows = []
             for ap in appts:
@@ -372,13 +328,13 @@ def t1_load_customers(n_clicks, group_values):
                 current_status = str(df_full.iloc[-1]["Status"]) if not df_full.empty else ""
 
             status_color = td.PASTEL_COLOR.get(current_status, "#e6e6e6")
-            status_html = f"{dot(status_color)}{html_escape(current_status) if current_status else '—'}" if current_status else "—"
+            status_html = f"{dot_html(status_color)}{html_escape(current_status) if current_status else '—'}" if current_status else "—"
 
-            # Complaints pills
+            # Complaints pills (display only)
             complaints = td.fetch_customer_complaints(cid)
             complaint_names = [c["Title"] for c in complaints if c.get("Title")]
             complaints_html = " ".join(
-                pill(t, color_for_label(t), border=BORDER) for t in complaint_names
+                pill_html(t, color_for_label(t), border=BORDER) for t in complaint_names
             ) if complaint_names else "—"
 
             rows.append({
@@ -406,7 +362,6 @@ def t1_load_customers(n_clicks, group_values):
             {"name":"Sex", "id":"Sex"},
         ]
 
-        # ~5 visible rows with scroll, consistent spacing
         table = dash_table.DataTable(
             id="t1-athlete-table",
             data=rows,
@@ -430,7 +385,7 @@ def t1_load_customers(n_clicks, group_values):
             style_data={"borderBottom":"1px solid #eceff4"},
             style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
             row_selectable="single",
-            selected_rows=[],
+            selected_rows=[0],  # preselect first row so comment UI populates immediately
         )
 
         return table, rows, "", False
@@ -444,18 +399,15 @@ def t1_load_customers(n_clicks, group_values):
         ])
         return no_update, no_update, msg, True
 
-
-# ------------------------- Tab 1: On select athlete -------------------------
+# ───────────────────────── Tab 1: On select athlete ─────────────────────────
 @app.callback(
     Output("t1-complaint-dd", "options"),
     Output("t1-complaint-dd", "value"),
     Output("t1-comments-table", "data"),
     Output("t1-selected-athlete-label", "children"),
     Output("t1-comment-date", "date"),
-    Output("t1-comment-status", "children", allow_duplicate=True),  # clear badge on selection
     Input("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
-    prevent_initial_call=True,
 )
 def t1_on_select(selected_rows, rows_json):
     if not rows_json:
@@ -464,65 +416,63 @@ def t1_on_select(selected_rows, rows_json):
     today = date.today().strftime("%Y-%m-%d")
 
     if not selected_rows:
-        return [], None, [], "", today, ""
+        return [], None, [], "", today
 
     row = rows_json[selected_rows[0]]
     cid = int(row["_cid"])
     label = row["_athlete_label"]
 
-    # complaint options for dropdown
     complaints = td.fetch_customer_complaints(cid)
     names = [c["Title"] for c in complaints if c.get("Title")]
     opts = [{"label": n, "value": n} for n in sorted(set(names))]
     val = opts[0]["value"] if opts else None
 
-    # existing comments for this athlete (with ids)
     comments = _db_list_comments_with_ids([cid])
     expanded = [_expand_comment_record(rec, label) for rec in comments]
 
-    return opts, val, expanded, f" — {label}", today, ""
+    return opts, val, expanded, f" — {label}", today
 
-
-# ------------------------- Tab 1: Save comment -------------------------
+# ───────────────────────── Tab 1: Save comment ─────────────────────────
 @app.callback(
     Output("t1-comments-table", "data", allow_duplicate=True),
+    Output("t1-comment-text", "value", allow_duplicate=True),
     Output("t1-comment-status", "children", allow_duplicate=True),
-    Output("t1-comment-text", "value", allow_duplicate=True),  # clear textarea
     State("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
     State("t1-complaint-dd", "value"),
     State("t1-comment-date", "date"),
     State("t1-comment-text", "value"),
+    State("t1-comments-table", "data"),
     Input("t1-save-comment", "n_clicks"),
     prevent_initial_call=True,
 )
-def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
+def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, table_data, _n):
     if not _n or not rows_json or not selected_rows or not date_str or not (text or "").strip():
         raise PreventUpdate
 
     row = rows_json[selected_rows[0]]
     cid = int(row["_cid"])
     label = row["_athlete_label"]
+    author = _get_signed_in_name()
 
-    # Persist to SQLite with complaint (our own insert that includes complaint)
-    _db_add_comment(cid, label, date_str, text.strip(), complaint or "")
+    new_id = _db_add_comment_returning(cid, label, date_str, text.strip())
 
-    # Re-read; mark the newest row's "By"
-    by_who = _get_signed_in_name()
-    comments = _db_list_comments_with_ids([cid])
-    expanded = [_expand_comment_record(rec, label) for rec in comments]
-    if expanded:
-        # assume highest _id is the one we just added
-        max_id = max(r["_id"] for r in expanded if r.get("_id") is not None)
-        for r in expanded:
-            if r["_id"] == max_id:
-                r["By"] = by_who
-                break
+    new_row = {
+        "_id": new_id,
+        "Date": date_str,
+        "By": author or "",
+        "Athlete": label,
+        "Complaint": complaint or "",
+        "Status": "",
+        "Comment": text.strip(),
+    }
 
-    return expanded, status_badge("Comment saved."), ""
+    current = table_data or []
+    updated = current + [new_row]
 
+    return updated, "", status_pill_component("Comment saved.", "success")
 
-# ------------------------- Tab 1: Persist edits/deletes -------------------------
+# ───────────────────────── Tab 1: Persist edits/deletes ─────────────────────────
 @app.callback(
     Output("t1-comment-status", "children", allow_duplicate=True),
     Input("t1-comments-table", "data_timestamp"),
@@ -531,10 +481,6 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, _n):
     prevent_initial_call=True,
 )
 def t1_persist_comment_mutations(_ts, data, data_prev):
-    """
-    Detect row deletes or inline edits and update SQLite accordingly.
-    Only the Comment column is editable; Complaint stays attached to the row.
-    """
     try:
         if data_prev is None:
             raise PreventUpdate
@@ -542,12 +488,10 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
         prev_by_id = {r["_id"]: r for r in data_prev if r.get("_id") is not None}
         now_by_id  = {r["_id"]: r for r in data     if r.get("_id") is not None}
 
-        # Deletes: present before, missing now
         deleted_ids = [cid for cid in prev_by_id.keys() if cid not in now_by_id]
         for i in deleted_ids:
             _db_delete_comment(i)
 
-        # Edits: comment text changed
         any_edit = False
         for cid, now in now_by_id.items():
             before = prev_by_id.get(cid)
@@ -557,90 +501,53 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
                 _db_update_comment_text(cid, now.get("Comment") or "")
                 any_edit = True
 
-        if deleted_ids:
-            return status_badge("Comment deleted.")
-        if any_edit:
-            return status_badge("Comment updated.")
-        raise PreventUpdate
+        if deleted_ids and any_edit:
+            return status_pill_component("Comments updated & deleted.", "success")
+        elif deleted_ids:
+            return status_pill_component("Comment deleted.", "success")
+        elif any_edit:
+            return status_pill_component("Comment updated.", "success")
+        else:
+            raise PreventUpdate
     except Exception as e:
-        return html.Span(
-            f"Comment persistence error: {e}",
-            style={
-                "display": "inline-block", "padding": "2px 8px", "borderRadius": "999px",
-                "background": "#fdecea", "color": "#5f2120", "border": "1px solid #f5c2c7",
-                "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap",
-            },
-        )
+        return status_pill_component(f"Comment persistence error: {e}", "danger")
 
-
-# =========================
-# SQLite helpers (reuse td.DB_PATH)
-# =========================
+# ───────────────────────── SQLite helpers (reuse td.DB_PATH) ─────────────────────────
 def _db_connect():
     return sqlite3.connect(td.DB_PATH, check_same_thread=False)
 
-def _db_add_comment(customer_id: int, customer_label: str, date_str: str, comment: str, complaint: str):
+def _db_add_comment_returning(customer_id: int, customer_label: str, date_str: str, comment: str) -> int:
     conn = _db_connect(); cur = conn.cursor()
-    # ensure column exists (defensive — migration already ran)
-    cur.execute("PRAGMA table_info(comments)")
-    cols = [r[1] for r in cur.fetchall()]
-    if "complaint" not in cols:
-        cur.execute("ALTER TABLE comments ADD COLUMN complaint TEXT")
     cur.execute(
-        "INSERT INTO comments(customer_id, customer_label, date, comment, created_at, complaint) "
-        "VALUES (?, ?, ?, ?, datetime('now'), ?)",
-        (int(customer_id) if customer_id is not None else None, customer_label or "", date_str, comment, complaint or "")
+        "INSERT INTO comments(customer_id, customer_label, date, comment, created_at) VALUES (?,?,?,?,datetime('now'))",
+        (int(customer_id), customer_label or "", date_str, comment)
     )
+    new_id = cur.lastrowid
     conn.commit(); conn.close()
+    return int(new_id)
 
 def _db_list_comments_with_ids(customer_ids):
     conn = _db_connect(); cur = conn.cursor()
-    # read with complaint if present
-    cur.execute("PRAGMA table_info(comments)")
-    cols = [r[1] for r in cur.fetchall()]
-    has_complaint = "complaint" in cols
     if customer_ids:
         vals = [int(x) for x in customer_ids]
         q = ",".join("?" for _ in vals)
-        if has_complaint:
-            cur.execute(f"""
-              SELECT id, date, comment, customer_label, customer_id, created_at, complaint
-              FROM comments
-              WHERE customer_id IN ({q})
-              ORDER BY date ASC, id ASC
-            """, vals)
-        else:
-            cur.execute(f"""
-              SELECT id, date, comment, customer_label, customer_id, created_at
-              FROM comments
-              WHERE customer_id IN ({q})
-              ORDER BY date ASC, id ASC
-            """, vals)
+        cur.execute(f"""
+          SELECT id, date, comment, customer_label, customer_id, created_at
+          FROM comments
+          WHERE customer_id IN ({q})
+          ORDER BY date ASC, id ASC
+        """, vals)
     else:
-        if has_complaint:
-            cur.execute("SELECT id, date, comment, customer_label, customer_id, created_at, complaint FROM comments ORDER BY date ASC, id ASC")
-        else:
-            cur.execute("SELECT id, date, comment, customer_label, customer_id, created_at FROM comments ORDER BY date ASC, id ASC")
+        cur.execute("SELECT id, date, comment, customer_label, customer_id, created_at FROM comments ORDER BY date ASC, id ASC")
     rows = cur.fetchall(); conn.close()
-
-    out = []
-    for r in rows:
-        # unpack depending on presence of complaint
-        if len(r) == 7:
-            _id, dt, comment, label, cid, created_at, complaint = r
-        else:
-            _id, dt, comment, label, cid, created_at = r
-            complaint = ""
-        out.append({
-            "_id": _id,
-            "Date": dt,
-            "Comment": comment,
-            "Athlete": label,
-            "Complaint": complaint or "",
-            "_cid": cid,
-            "_created_at": created_at,
-        })
-    return out
+    return [{
+        "_id": r[0],
+        "Date": r[1],
+        "Comment": r[2],
+        "Athlete": r[3],
+        "_cid": r[4],
+        "_created_at": r[5],
+    } for r in rows]
 
 def _db_delete_comment(comment_id: int):
     conn = _db_connect(); cur = conn.cursor()
@@ -653,42 +560,19 @@ def _db_update_comment_text(comment_id: int, new_text: str):
     conn.commit(); conn.close()
 
 def _expand_comment_record(rec, athlete_label):
-    """
-    Map raw DB row -> table row. Keep complaint bound to the row.
-    """
     return {
         "_id": rec["_id"],
         "Date": rec["Date"],
-        "By": "",                         # we don’t store author; set only on the newest row after save
+        "By": "",
         "Athlete": athlete_label,
-        "Complaint": rec.get("Complaint", "") or "",
-        "Status": "",                     # placeholder for future
+        "Complaint": "",
+        "Status": "",
         "Comment": rec["Comment"],
     }
 
-def _get_signed_in_name():
-    """Get 'First Last' (fallback email) for the current user via /api/csiauth/me/."""
-    try:
-        token = auth.get_token()
-        if not token:
-            return ""
-        headers = {"Authorization": f"Bearer {token}"}
-        r = requests.get(f"{SITE_URL}/api/csiauth/me/", headers=headers, timeout=5)
-        if r.status_code != 200:
-            return ""
-        js = r.json()
-        name = " ".join([js.get("first_name","").strip(), js.get("last_name","").strip()]).strip()
-        if not name:
-            name = js.get("email","")
-        return name or ""
-    except Exception:
-        return ""
-
-
-# ------------------------- Register Training tab callbacks -------------------------
+# ───────────────────────── Training tab callbacks ─────────────────────────
 td.register_callbacks(app)
 
-
-# ------------------------- Main -------------------------
+# ───────────────────────── Main ─────────────────────────
 if __name__ == "__main__":
     app.run(debug=False, port=8050)
