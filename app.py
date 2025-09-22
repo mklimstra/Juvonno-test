@@ -227,6 +227,33 @@ app = Dash(
     suppress_callback_exceptions=True,
 )
 
+# >>> Minimal, nice-looking pill tabs (only change is here) <<<
+TABS_CONTAINER_STYLE = {
+    "display": "flex",
+    "gap": "6px",
+    "flexWrap": "wrap",
+    "borderBottom": "0",
+    "marginBottom": "4px"
+}
+TAB_STYLE = {
+    "padding": "8px 14px",
+    "border": "1px solid #e9ecef",
+    "borderRadius": "999px",
+    "background": "#f8f9fb",
+    "color": "#495057",
+    "fontWeight": "500",
+    "marginRight": "0",
+}
+TAB_SELECTED_STYLE = {
+    "padding": "8px 14px",
+    "border": "1px solid #cfe2ff",
+    "borderRadius": "999px",
+    "background": "#e7f1ff",
+    "color": "#084298",
+    "fontWeight": "600",
+    "boxShadow": "inset 0 1px 0 rgba(255,255,255,.6)"
+}
+
 app.layout = html.Div([
     dcc.Location(id="redirect-to", refresh=True),
     dcc.Interval(id="init-interval", interval=500, n_intervals=0, max_intervals=1),
@@ -235,9 +262,26 @@ app.layout = html.Div([
     Navbar([html.Span(id="navbar-user", className="text-white-50 small", children="")]).render(),
 
     dbc.Container([
-        dcc.Tabs(id="main-tabs", value="tab-1",
-                 children=[dcc.Tab(label="Athlete Status", value="tab-1"),
-                           dcc.Tab(label="Status History", value="tab-2")]),
+        dcc.Tabs(
+            id="main-tabs",
+            value="tab-1",
+            style=TABS_CONTAINER_STYLE,            # container styling
+            parent_style={"border": "0"},          # remove default underline border
+            children=[
+                dcc.Tab(
+                    label="Athlete Status",
+                    value="tab-1",
+                    style=TAB_STYLE,
+                    selected_style=TAB_SELECTED_STYLE,
+                ),
+                dcc.Tab(
+                    label="Status History",
+                    value="tab-2",
+                    style=TAB_STYLE,
+                    selected_style=TAB_SELECTED_STYLE,
+                ),
+            ],
+        ),
         html.Div(id="tabs-content", className="mt-3"),
     ], fluid=True),
 
