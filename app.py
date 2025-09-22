@@ -143,14 +143,14 @@ def _get_signed_in_name() -> str:
 # ───────────────────────── Tab 1 (Overview) ─────────────────────────
 def tab1_layout():
     return dbc.Container([
-        html.H3("Athlete Status", className="mt-2"),
+        html.H3("Athlete List", className="mt-2"),
 
         dbc.Row([
             dbc.Col(dcc.Dropdown(
                 id="t1-group-dd",
                 options=td.GROUP_OPTS,
                 multi=True,
-                placeholder="Select patient group(s)…"
+                placeholder="Select athlete group(s)…"
             ), md=6),
             dbc.Col(dbc.Button("Load", id="t1-load", color="primary", className="w-100"), md=2),
         ], className="g-2 mb-2"),
@@ -236,8 +236,8 @@ app.layout = html.Div([
 
     dbc.Container([
         dcc.Tabs(id="main-tabs", value="tab-1",
-                 children=[dcc.Tab(label="Overview", value="tab-1"),
-                           dcc.Tab(label="Training Dashboard", value="tab-2")]),
+                 children=[dcc.Tab(label="Athlete Status", value="tab-1"),
+                           dcc.Tab(label="Status History", value="tab-2")]),
         html.Div(id="tabs-content", className="mt-3"),
     ], fluid=True),
 
