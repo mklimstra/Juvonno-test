@@ -1,6 +1,6 @@
-# training_dashboard.py — dashboard content + callbacks
+# training_dashboard.py — dashboard content + callbacks (comments removed, calendar open)
 from __future__ import annotations
-import os, sqlite3, requests, functools, traceback, re  # <-- re added
+import os, sqlite3, requests, functools, traceback, re
 from datetime import datetime
 from typing import Dict, List, Union, Iterable, Tuple, Optional
 
@@ -20,7 +20,6 @@ except ImportError:
 import plotly.graph_objects as go
 
 # ────────── API config ──────────
-# MINIMAL CHANGE: remove hard-coded default; require env var on Posit
 API_KEY = os.getenv("JUV_API_KEY")
 BASE    = "https://csipacific.juvonno.com/api"
 HEADERS = {"accept": "application/json"}
@@ -37,7 +36,7 @@ def _get(path: str, **params):
     r.raise_for_status()
     return r.json()
 
-# ────────── SQLite persistence for comments ──────────
+# ────────── SQLite persistence (kept so DB exists for app.py; not used here) ──────────
 DB_PATH = os.path.join(os.path.dirname(__file__), "comments.db")
 
 def _db():
@@ -54,16 +53,6 @@ def _db():
     """)
     conn.commit()
     return conn
-
-def db_add_comment(customer_id: int, customer_label: str, date_str: str, comment: str):
-    conn = _db()
-    conn.execute(
-        "INSERT INTO comments(customer_id, customer_label, date, comment, created_at) VALUES (?,?,?,?,?)",
-        (int(customer_id) if customer_id is not None else None,
-         customer_label or "", date_str, comment, datetime.utcnow().isoformat(timespec="seconds"))
-    )
-    conn.commit()
-    conn.close()
 
 def db_list_comments(customer_ids: Iterable[int] | None) -> List[Dict]:
     conn = _db(); cur = conn.cursor()
@@ -96,7 +85,6 @@ def fetch_customers_full() -> Dict[int, Dict]:
         page += 1
     return {c["id"]: c for c in out if c.get("id")}
 
-# Require API key before any network I/O
 _require_api_key()
 CUSTOMERS = fetch_customers_full()
 
@@ -199,7 +187,7 @@ def list_complaints_for_appt(aid: int) -> List[Dict]:
     if isinstance(js, dict) and isinstance(js.get("list"), list): return js["list"]
     return []
 
-# ── Athlete-level complaints (merge) ──
+# ── Athlete-level complaints (merge) ──────────
 def _fmt_date(val) -> str:
     if not val: return ""
     try: return pd.to_datetime(str(val)).strftime("%Y-%m-%d")
@@ -227,7 +215,7 @@ def _norm_complaint_fields(rec: Dict) -> Dict:
 def fetch_customer_complaints(customer_id: int) -> List[Dict]:
     out: List[Dict] = []
 
-    # 1) Customer-level endpoints
+    # 1) Customer-level
     try:
         js = _get(f"customers/{customer_id}/complaints", include="full", page=1, count=100)
         block = js.get("list", js)
@@ -264,7 +252,7 @@ def fetch_customer_complaints(customer_id: int) -> List[Dict]:
             name = _extract_name(comp_inline)
             if name: out.append({"name": name, "id": comp_inline.get("id")})
 
-    # Normalize + dedupe (by Id or Title casefold)
+    # Normalize + dedupe
     normed = [_norm_complaint_fields(r) for r in out if isinstance(r, dict)]
     dedup: Dict[Tuple, Dict] = {}
     for r in normed:
@@ -275,9 +263,11 @@ def fetch_customer_complaints(customer_id: int) -> List[Dict]:
                 if (not prev.get(f)) and r.get(f): prev[f] = r[f]
         else:
             dedup[key] = r
+
     def _sort_key(d):
         try: return (0, pd.to_datetime(d["Onset"]))
         except Exception: return (1, pd.Timestamp.min)
+
     return sorted(dedup.values(), key=_sort_key, reverse=True)
 
 # ────────── Pastel palette (table + calendar) ──────────
@@ -289,11 +279,11 @@ STATUS_ORDER = [
     "No participation unrelated to injury/illness/other health problems",
 ]
 PASTEL_COLOR = {
-    STATUS_ORDER[0]: "#BDE7BD",  # pastel green
-    STATUS_ORDER[1]: "#D6F2C6",  # lighter green
-    STATUS_ORDER[2]: "#FFD9A8",  # pastel orange
-    STATUS_ORDER[3]: "#F5B1B1",  # pastel red
-    STATUS_ORDER[4]: "#D8C6F0",  # pastel purple
+    STATUS_ORDER[0]: "#BDE7BD",
+    STATUS_ORDER[1]: "#D6F2C6",
+    STATUS_ORDER[2]: "#FFD9A8",
+    STATUS_ORDER[3]: "#F5B1B1",
+    STATUS_ORDER[4]: "#D8C6F0",
 }
 COLOR_LIST = [PASTEL_COLOR[s] for s in STATUS_ORDER]
 STATUS_CODE = {s: i for i, s in enumerate(STATUS_ORDER)}
@@ -327,7 +317,6 @@ def discrete_colorscale_from_hexes(hexes: List[str]) -> list:
 LIGHT_GREY = "#f2f3f5"
 
 def clickable_header(title: str, click_id: str, symbol_id: str, header_id: str):
-    """Light grey CardHeader with full-width clickable inner div and +/- symbol."""
     return dbc.CardHeader(
         html.Div(
             [html.Span(id=symbol_id, children="−", className="me-2"),
@@ -365,7 +354,7 @@ def layout_body():
                          id="col-summary", is_open=True)
         ], className="mb-3", style=CARD_STYLE),
 
-        # 1) Training-Status Calendar (closed)
+        # 1) Training-Status Calendar (OPEN by default now)
         dbc.Card([
             clickable_header("Training-Status Calendar", "hdr-cal", "sym-cal", "hdr-cal-container"),
             dbc.Collapse(dbc.CardBody([
@@ -374,38 +363,10 @@ def layout_body():
                 html.Div(id="calendar-heatmap-container"),
                 html.Div(html.B("Hovered date:"), className="mt-2"),
                 html.Div(id="hover-date", style={"fontStyle": "italic"})
-            ], style={"paddingTop":"0.5rem"}), id="col-cal", is_open=False)
+            ], style={"paddingTop":"0.5rem"}), id="col-cal", is_open=True)  # ← was False
         ], className="mb-3", style=CARD_STYLE),
 
-        # 2) Comments (open)
-        dbc.Card([
-            clickable_header("Comments", "hdr-comments", "sym-comments", "hdr-comments-container"),
-            dbc.Collapse(dbc.CardBody([
-                dbc.Row([
-                    dbc.Col(dcc.DatePickerSingle(id="comment-date", display_format="YYYY-MM-DD"), md=3),
-                    dbc.Col(dcc.Dropdown(id="comment-athlete", placeholder="Choose athlete…"), md=3),
-                    dbc.Col(dcc.Textarea(id="comment-text",
-                                         placeholder="Add a note about the athlete for this date…",
-                                         style={"width":"100%","height":"80px"}), md=4),
-                    dbc.Col(dbc.Button("Save", id="comment-save", color="success", className="w-100"), md=2),
-                ], className="g-2"),
-                html.Div(id="comment-hint", className="text-muted", style={"fontSize":"12px", "marginTop":"4px"}),
-                html.Hr(),
-                dash_table.DataTable(
-                    id="comments-table",
-                    columns=[{"name":"Date","id":"Date"},{"name":"Comment","id":"Comment"}],
-                    data=[],
-                    page_size=7,
-                    style_header={"fontWeight":"600","backgroundColor":"#f8f9fa"},
-                    style_cell={"padding":"8px","fontSize":13,
-                                "fontFamily":"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
-                                "textAlign":"left"},
-                    style_data={"whiteSpace":"normal","height":"auto","borderBottom":"1px solid #eee"},
-                ),
-            ], style={"paddingTop":"0.5rem"}), id="col-comments", is_open=True)
-        ], className="mb-3", style=CARD_STYLE),
-
-        # 3) Appointments table (closed)
+        # 2) Appointments table (closed)
         dbc.Card([
             clickable_header("Appointments", "hdr-table", "sym-table", "hdr-table-container"),
             dbc.Collapse(dbc.CardBody(html.Div(id="appointment-table-container", style={"paddingTop":"0.5rem"})),
@@ -448,16 +409,6 @@ def register_callbacks(app: dash.Dash):
         new = _toggle(is_open); return new, _sym(new), _hdr_style(new)
 
     @app.callback(
-        Output("col-comments","is_open"),
-        Output("sym-comments","children"),
-        Output("hdr-comments-container","style"),
-        Input("hdr-comments","n_clicks"),
-        State("col-comments","is_open"),
-        prevent_initial_call=True)
-    def toggle_comments(n, is_open):
-        new = _toggle(is_open); return new, _sym(new), _hdr_style(new)
-
-    @app.callback(
         Output("col-table","is_open"),
         Output("sym-table","children"),
         Output("hdr-table-container","style"),
@@ -467,7 +418,7 @@ def register_callbacks(app: dash.Dash):
     def toggle_table(n, is_open):
         new = _toggle(is_open); return new, _sym(new), _hdr_style(new)
 
-    # ① Load groups → Athlete selector (Dropdown, single-select)
+    # ① Load groups → Athlete selector
     @app.callback(
         Output("customer-checklist-container", "children"),
         Output("msg", "children"), Output("msg", "is_open"),
@@ -575,7 +526,7 @@ def register_callbacks(app: dash.Dash):
             work = df.copy()
             if focus_value and focus_value != "__ALL__":
                 mask = work["Complaint Names"].str.contains(
-                    rf"(^|;\s*){re.escape(focus_value)}($|;\s*)", case=False, na=False  # <-- re.escape
+                    rf"(^|;\s*){re.escape(focus_value)}($|;\s*)", case=False, na=False
                 )
                 work = work[mask].copy()
 
@@ -615,7 +566,7 @@ def register_callbacks(app: dash.Dash):
             df_valid["Status Code"] = df_valid["Training Status"].map(STATUS_CODE)
 
             full_index = pd.date_range(start=df_valid["Date"].min(),
-                                    end=pd.Timestamp("today").normalize(), freq="D")
+                                       end=pd.Timestamp("today").normalize(), freq="D")
             heat_df = pd.DataFrame({"Date": full_index})
             heat_df = heat_df.merge(df_valid[["Date","Status Code"]], on="Date", how="left").sort_values("Date")
             heat_df["Status Code"] = heat_df["Status Code"].ffill().fillna(-1).astype(int)
@@ -630,15 +581,17 @@ def register_callbacks(app: dash.Dash):
             colorscale = discrete_colorscale_from_hexes(COLOR_LIST)
             fig_cal = pc.calplot(heat_df, x="Date", y="Status Code", colorscale=colorscale)
 
+            # Hide legend / colorbar
             heatmap: Optional[go.Heatmap] = next((t for t in fig_cal.data if isinstance(t, go.Heatmap)), None)
             if heatmap is not None:
-                heatmap.showscale = True
+                heatmap.showscale = False   # ← hide colorbar
                 heatmap.zmin = 0
                 heatmap.zmax = 4
                 heatmap.xgap = 2
                 heatmap.ygap = 2
+            fig_cal.update_layout(showlegend=False)  # ← no side legend
 
-            # Typography / labels in black
+            # Typography / layout
             fig_cal.update_layout(
                 title_text=f"Calendar Heatmap: {int(heat_df['Date'].dt.year.max())}",
                 margin=dict(l=18, r=18, t=46, b=10),
@@ -646,11 +599,28 @@ def register_callbacks(app: dash.Dash):
                 paper_bgcolor="white",
                 plot_bgcolor="white",
                 font=dict(family="system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
-                        size=13, color="#111111"),
+                          size=13, color="#111111"),
                 title_font_color="#111111",
             )
             fig_cal.update_xaxes(tickfont=dict(color="#111111"))
             fig_cal.update_yaxes(tickfont=dict(color="#111111"))
+
+            # Abbreviate month labels (Plotly Calplot places month names in annotations)
+            MONTH_FULL_TO_ABBR = {
+                "January":"Jan","February":"Feb","March":"Mar","April":"Apr","May":"May","June":"Jun",
+                "July":"Jul","August":"Aug","September":"Sep","October":"Oct","November":"Nov","December":"Dec"
+            }
+            anns = list(getattr(fig_cal.layout, "annotations", []) or [])
+            changed = False
+            for ann in anns:
+                try:
+                    if isinstance(ann.text, str) and ann.text in MONTH_FULL_TO_ABBR:
+                        ann.text = MONTH_FULL_TO_ABBR[ann.text]
+                        changed = True
+                except Exception:
+                    pass
+            if changed:
+                fig_cal.layout.annotations = tuple(anns)
 
             # Day numbers (bold if appointment day)
             appt_dates = set(work["Date"].dt.date.tolist())
@@ -702,68 +672,11 @@ def register_callbacks(app: dash.Dash):
                 html.Pre(tb),
             ]), {}, [], None, "", False
 
-    # Comments controls
-    @app.callback(
-        Output("comment-athlete", "options"),
-        Output("comment-athlete", "value"),
-        Output("comment-hint", "children"),
-        Input("selected-athletes-map", "data"),
-    )
-    def update_comment_controls(id_to_label):
-        if not id_to_label:
-            return [], None, "Select an athlete above; comments will filter to that athlete."
-        opts = [{"label": lbl, "value": int(cid)} for cid, lbl in id_to_label.items()]
-        first_val = opts[0]["value"]
-        return opts, first_val, "Showing comments for the selected athlete."
-
-    @app.callback(Output("comments-table", "data"), Input("comment-athlete", "value"))
-    def refresh_comments_for_selected(athlete_id):
-        if not athlete_id: return []
-        return db_list_comments([int(athlete_id)])
-
-    # Hover & click on calendar
-    @app.callback(Output("hover-date", "children"), Input("cal-graph", "hoverData"), prevent_initial_call=True)
-    def display_hover_date(hoverData):
-        if not hoverData or "points" not in hoverData: return ""
-        pt = hoverData["points"][0]
-        candidate = pt.get("customdata",[None])[0] if "customdata" in pt else pt.get("x","")
-        try:
-            dt = pd.to_datetime(candidate).date(); return f"{dt}"
-        except Exception:
-            return str(candidate)
-
-    @app.callback(Output("comment-date", "date"), Input("cal-graph", "clickData"), prevent_initial_call=True)
-    def click_prefill_date(clickData):
-        if not clickData or "points" not in clickData: return no_update
-        pt = clickData["points"][0]
-        candidate = pt.get("customdata",[None])[0] if "customdata" in pt else pt.get("x","")
-        try:
-            dt = pd.to_datetime(candidate).date(); return dt.strftime("%Y-%m-%d")
-        except Exception:
-            return no_update
-
-    # Save comment → DB + refresh
-    @app.callback(
-        Output("comments-table", "data", allow_duplicate=True),
-        State("comment-athlete", "value"),
-        State("selected-athletes-map", "data"),
-        State("comment-date", "date"),
-        State("comment-text", "value"),
-        Input("comment-save", "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def save_comment_and_refresh(athlete_id, id_to_label, date_str, text, _n):
-        if not athlete_id or not date_str or not (text or "").strip(): return no_update
-        athlete_id = int(athlete_id)
-        label = id_to_label.get(str(athlete_id)) or id_to_label.get(athlete_id) or f"ID {athlete_id}"
-        db_add_comment(athlete_id, label, date_str, text.strip())
-        return db_list_comments([athlete_id])
-
-    # Athlete Summary
+    # Athlete Summary (now listens to cust-select directly)
     @app.callback(
         Output("athlete-summary-container", "children"),
         Input("selected-athletes-map", "data"),
-        Input("comment-athlete", "value"),
+        Input("cust-select", "value"),
     )
     def render_athlete_summary(id_to_label, focus_id):
         cid = None
