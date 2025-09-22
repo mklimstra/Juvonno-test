@@ -1,4 +1,4 @@
-# training_dashboard.py — dashboard content + callbacks (comments removed, calendar open)
+# training_dashboard.py — dashboard content + callbacks (comments removed, calendar open, month abbr, focus filter)
 from __future__ import annotations
 import os, sqlite3, requests, functools, traceback, re
 from datetime import datetime
@@ -36,7 +36,7 @@ def _get(path: str, **params):
     r.raise_for_status()
     return r.json()
 
-# ────────── SQLite persistence (kept so DB exists for app.py; not used here) ──────────
+# ────────── SQLite (kept for DB existence; not used here) ──────────
 DB_PATH = os.path.join(os.path.dirname(__file__), "comments.db")
 
 def _db():
@@ -354,16 +354,14 @@ def layout_body():
                          id="col-summary", is_open=True)
         ], className="mb-3", style=CARD_STYLE),
 
-        # 1) Training-Status Calendar (OPEN by default now)
+        # 1) Training-Status Calendar (OPEN by default)
         dbc.Card([
             clickable_header("Training-Status Calendar", "hdr-cal", "sym-cal", "hdr-cal-container"),
             dbc.Collapse(dbc.CardBody([
                 dcc.Dropdown(id="focus-complaint", placeholder="Focus complaint (optional)…",
                              clearable=True, style={"maxWidth":"420px"}, className="mb-2"),
                 html.Div(id="calendar-heatmap-container"),
-                html.Div(html.B("Hovered date:"), className="mt-2"),
-                html.Div(id="hover-date", style={"fontStyle": "italic"})
-            ], style={"paddingTop":"0.5rem"}), id="col-cal", is_open=True)  # ← was False
+            ], style={"paddingTop":"0.5rem"}), id="col-cal", is_open=True)
         ], className="mb-3", style=CARD_STYLE),
 
         # 2) Appointments table (closed)
@@ -447,40 +445,74 @@ def register_callbacks(app: dash.Dash):
         )
         return selector, "", False
 
-    # ② Selection → Calendar + Table + Complaint Focus (single athlete)
+    # ②A When athlete changes → update map + focus options + reset focus to ALL
     @app.callback(
-        Output("calendar-heatmap-container", "children"),
-        Output("appointment-table-container", "children"),
         Output("selected-athletes-map", "data"),
         Output("focus-complaint", "options"),
         Output("focus-complaint", "value"),
         Output("msg", "children", allow_duplicate=True),
         Output("msg", "is_open", allow_duplicate=True),
         Input("cust-select", "value"),
-        State("focus-complaint", "value"),
         prevent_initial_call=True,
     )
-    def show_calendar_and_table(selected_cid, previously_focused):
+    def update_focus_options(selected_cid):
         try:
             if not selected_cid:
-                return "", html.Div("Select an athlete."), {}, [], None, "", False
-
-            rows = []
-            id_to_label = {}
-            appointment_complaints: set[str] = set()
-            customer_complaints_union: set[str] = set()
+                return {}, [], None, "", False
 
             cid = int(selected_cid)
             cust = CUSTOMERS.get(cid, {})
             label = f"{cust.get('first_name','')} {cust.get('last_name','')} (ID {cid})".strip()
-            id_to_label[cid] = label
+            id_to_label = {cid: label}
 
-            # Customer-level complaints
+            # Build union of complaint names (customer + appointments)
+            appointment_complaints: set[str] = set()
+            customer_complaints_union: set[str] = set()
+
             for c in fetch_customer_complaints(cid):
                 n = (c.get("Title") or "").strip()
                 if n: customer_complaints_union.add(n)
 
-            # Appointments + complaints
+            for ap in CID_TO_APPTS.get(cid, []):
+                names: List[str] = []
+                for rec in list_complaints_for_appt(ap.get("id")):
+                    nm = _extract_name(rec)
+                    if nm: names.append(nm)
+                comp_inline = ap.get("complaint")
+                if isinstance(comp_inline, dict):
+                    nm = _extract_name(comp_inline)
+                    if nm: names.append(nm)
+                names = sorted(set(n.strip() for n in names if n.strip()))
+                if names: appointment_complaints.update(names)
+
+            all_names = sorted({n for n in (appointment_complaints | customer_complaints_union) if n})
+            opts = [{"label":"All complaints","value":"__ALL__"}] + [{"label": n, "value": n} for n in all_names]
+
+            return id_to_label, opts, "__ALL__", "", False
+        except Exception:
+            tb = traceback.format_exc()
+            print("\n=== update_focus_options error ===\n", tb)
+            return {}, [], None, "Error preparing focus options.", True
+
+    # ②B Athlete or Focus change → rebuild calendar & table
+    @app.callback(
+        Output("calendar-heatmap-container", "children"),
+        Output("appointment-table-container", "children"),
+        Output("msg", "children", allow_duplicate=True),
+        Output("msg", "is_open", allow_duplicate=True),
+        Input("cust-select", "value"),
+        Input("focus-complaint", "value"),
+        prevent_initial_call=True,
+    )
+    def show_calendar_and_table(selected_cid, focus_value):
+        try:
+            if not selected_cid:
+                return "", html.Div("Select an athlete."), "", False
+
+            cid = int(selected_cid)
+            rows = []
+
+            # Gather rows with status + complaint names
             for ap in CID_TO_APPTS.get(cid, []):
                 aid = ap.get("id")
                 date_str = tidy_date_str(ap.get("date"))
@@ -498,31 +530,20 @@ def register_callbacks(app: dash.Dash):
                     if nm: names.append(nm)
 
                 names = sorted(set(n.strip() for n in names if n.strip()))
-                if names: appointment_complaints.update(names)
-
                 rows.append({
                     "Date":            date_str,
                     "Training Status": status,
                     "Complaint Names": "; ".join(names) if names else "",
                 })
 
-            # Build union
-            all_names = sorted({n for n in (appointment_complaints | customer_complaints_union) if n})
-
             if not rows:
-                opts = [{"label":"All complaints","value":"__ALL__"}] + [{"label": n, "value": n} for n in all_names]
-                return "", html.Div("No appointments found."), id_to_label, opts, "__ALL__", "", False
+                return html.Div("No appointments found."), html.Div(), "", False
 
             df = pd.DataFrame(rows)
             df["Date"] = pd.to_datetime(df["Date"], format="%Y-%m-%d", errors="coerce")
             df = df.dropna(subset=["Date"]).sort_values(["Date"]).reset_index(drop=True)
 
-            # Focus dropdown
-            opts = [{"label":"All complaints","value":"__ALL__"}] + [{"label": n, "value": n} for n in all_names]
-            focus_value = previously_focused if previously_focused and \
-                        (previously_focused == "__ALL__" or previously_focused in all_names) else "__ALL__"
-
-            # Apply focus
+            # Apply focus filter
             work = df.copy()
             if focus_value and focus_value != "__ALL__":
                 mask = work["Complaint Names"].str.contains(
@@ -557,10 +578,10 @@ def register_callbacks(app: dash.Dash):
                 style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#fbfbfd"}],
             )
 
-            # Calendar
+            # Calendar (forward-fill to daily)
             df_valid = work[work["Training Status"].isin(STATUS_ORDER)].copy()
             if df_valid.empty:
-                return html.Div("No valid date/status for calendar."), table, id_to_label, opts, focus_value, "", False
+                return html.Div("No valid date/status for calendar."), table, "", False
 
             df_valid = df_valid.sort_values("Date").drop_duplicates("Date", keep="last")
             df_valid["Status Code"] = df_valid["Training Status"].map(STATUS_CODE)
@@ -576,7 +597,7 @@ def register_callbacks(app: dash.Dash):
                 return html.Div([
                     html.P("Cannot draw calendar heatmap: 'plotly-calplot' is not installed."),
                     html.P("Install with: pip install plotly-calplot"),
-                ]), table, id_to_label, opts, focus_value, "", False
+                ]), table, "", False
 
             colorscale = discrete_colorscale_from_hexes(COLOR_LIST)
             fig_cal = pc.calplot(heat_df, x="Date", y="Status Code", colorscale=colorscale)
@@ -584,14 +605,14 @@ def register_callbacks(app: dash.Dash):
             # Hide legend / colorbar
             heatmap: Optional[go.Heatmap] = next((t for t in fig_cal.data if isinstance(t, go.Heatmap)), None)
             if heatmap is not None:
-                heatmap.showscale = False   # ← hide colorbar
+                heatmap.showscale = False
                 heatmap.zmin = 0
                 heatmap.zmax = 4
                 heatmap.xgap = 2
                 heatmap.ygap = 2
-            fig_cal.update_layout(showlegend=False)  # ← no side legend
+            fig_cal.update_layout(showlegend=False)
 
-            # Typography / layout
+            # Styling
             fig_cal.update_layout(
                 title_text=f"Calendar Heatmap: {int(heat_df['Date'].dt.year.max())}",
                 margin=dict(l=18, r=18, t=46, b=10),
@@ -605,93 +626,51 @@ def register_callbacks(app: dash.Dash):
             fig_cal.update_xaxes(tickfont=dict(color="#111111"))
             fig_cal.update_yaxes(tickfont=dict(color="#111111"))
 
-            # Abbreviate month labels (Plotly Calplot places month names in annotations)
-            MONTH_FULL_TO_ABBR = {
+            # Abbreviate month names in all annotation texts (robust)
+            MONTHS = {
                 "January":"Jan","February":"Feb","March":"Mar","April":"Apr","May":"May","June":"Jun",
                 "July":"Jul","August":"Aug","September":"Sep","October":"Oct","November":"Nov","December":"Dec"
             }
+            month_pattern = re.compile(r"\b(" + "|".join(MONTHS.keys()) + r")\b")
             anns = list(getattr(fig_cal.layout, "annotations", []) or [])
             changed = False
             for ann in anns:
                 try:
-                    if isinstance(ann.text, str) and ann.text in MONTH_FULL_TO_ABBR:
-                        ann.text = MONTH_FULL_TO_ABBR[ann.text]
+                    txt = str(getattr(ann, "text", ""))
+                    if not txt:
+                        continue
+                    new_txt = month_pattern.sub(lambda m: MONTHS[m.group(1)], txt)
+                    if new_txt != txt:
+                        ann.text = new_txt
                         changed = True
                 except Exception:
                     pass
             if changed:
                 fig_cal.layout.annotations = tuple(anns)
 
-            # Day numbers (bold if appointment day)
-            appt_dates = set(work["Date"].dt.date.tolist())
-            if heatmap is not None:
-                x_cats = list(heatmap.x)
-                y_cats = list(heatmap.y)
-            else:
-                x_cats, y_cats = [], []
-
-            txt_x, txt_y, txt_text = [], [], []
-            for d in heat_df["Date"].dt.date.tolist():
-                wd = d.strftime("%a")
-                wk = int(pd.Timestamp(d).isocalendar().week)
-                if (not x_cats or wd in x_cats) and (not y_cats or (wk in y_cats or str(wk) in y_cats)):
-                    day_num = d.day
-                    txt = f"<b>{day_num}</b>" if d in appt_dates else f"{day_num}"
-                    txt_x.append(wd); txt_y.append(wk); txt_text.append(txt)
-
-            if txt_x:
-                fig_cal.add_trace(go.Scatter(
-                    x=txt_x, y=txt_y,
-                    mode="text",
-                    text=txt_text,
-                    textfont=dict(size=10, color="#111111"),
-                    textposition="middle center",
-                    hoverinfo="skip",
-                    showlegend=False
-                ))
-
-            # Optional tiny dots on appointment days
-            for d in appt_dates:
-                wd = d.strftime("%a"); wk = int(pd.Timestamp(d).isocalendar().week)
-                if (not x_cats or wd in x_cats) and (not y_cats or (wk in y_cats or str(wk) in y_cats)):
-                    fig_cal.add_trace(go.Scatter(
-                        x=[wd], y=[wk],
-                        mode="markers",
-                        marker=dict(symbol="circle", color="#d62728", size=5),
-                        hoverinfo="skip", showlegend=False
-                    ))
-
             cal_graph = dcc.Graph(id="cal-graph", figure=fig_cal, config={"displayModeBar": False})
-            return cal_graph, table, id_to_label, opts, focus_value, "", False
+            return cal_graph, table, "", False
 
         except Exception:
             tb = traceback.format_exc()
-            print("\n=== UNEXPECTED ERROR ===\n", tb)
+            print("\n=== show_calendar_and_table error ===\n", tb)
             return html.Div("Error building calendar."), html.Div([
                 html.P("Unexpected error in processing:"),
                 html.Pre(tb),
-            ]), {}, [], None, "", False
+            ]), "", True
 
-    # Athlete Summary (now listens to cust-select directly)
+    # Athlete Summary (listen to current selection directly)
     @app.callback(
         Output("athlete-summary-container", "children"),
-        Input("selected-athletes-map", "data"),
         Input("cust-select", "value"),
     )
-    def render_athlete_summary(id_to_label, focus_id):
-        cid = None
-        if focus_id:
-            cid = int(focus_id)
-        elif id_to_label:
-            try: cid = int(next(iter(id_to_label.keys())))
-            except Exception: cid = None
-
+    def render_athlete_summary(focus_id):
+        cid = int(focus_id) if focus_id else None
         if not cid or cid not in CUSTOMERS:
             return html.Div("Select an athlete to see demographics, current status, and complaints.", className="text-muted")
 
         cust = CUSTOMERS[cid]
-        label = id_to_label.get(str(cid)) or id_to_label.get(cid) \
-                or f"{cust.get('first_name','')} {cust.get('last_name','')} (ID {cid})"
+        label = f"{cust.get('first_name','')} {cust.get('last_name','')} (ID {cid})".strip()
 
         dob   = cust.get("dob") or cust.get("birthdate") or ""
         sex   = cust.get("sex") or cust.get("gender") or ""
@@ -699,7 +678,7 @@ def register_callbacks(app: dash.Dash):
         phone = cust.get("phone") or cust.get("mobile") or ""
 
         chips = [html.Span(g.title(), className="badge bg-light text-dark me-1 mb-1",
-                        style={"border":"1px solid #e3e6eb"}) for g in CID_TO_GROUPS.get(cid, [])]
+                           style={"border":"1px solid #e3e6eb"}) for g in CID_TO_GROUPS.get(cid, [])]
 
         # Current training status (forward-filled)
         appts = CID_TO_APPTS.get(cid, [])
@@ -729,15 +708,16 @@ def register_callbacks(app: dash.Dash):
             "border":"1px solid rgba(0,0,0,.25)","marginRight":"10px"
         })
 
+        # Complaints table with Onset / Priority / Status
         complaints = fetch_customer_complaints(cid)
         if complaints:
             comp_rows = [{"Title": c["Title"], "Onset": c["Onset"], "Priority": c["Priority"], "Status": c["Status"]}
-                        for c in complaints]
+                         for c in complaints]
             comp_table = dash_table.DataTable(
                 columns=[{"name":"Title","id":"Title"},
-                        {"name":"Onset","id":"Onset"},
-                        {"name":"Priority","id":"Priority"},
-                        {"name":"Status","id":"Status"}],
+                         {"name":"Onset","id":"Onset"},
+                         {"name":"Priority","id":"Priority"},
+                         {"name":"Status","id":"Status"}],
                 data=comp_rows, page_size=5,
                 style_header={"fontWeight":"600","backgroundColor":"#fafbfc"},
                 style_cell={"padding":"6px","fontSize":13,
