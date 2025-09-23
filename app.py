@@ -51,12 +51,11 @@ def color_for_label(text: str) -> str:
 
 def pill_html(text: str, bg=None, fg="#111", border=BORDER) -> str:
     bg = bg or PILL_BG_DEFAULT
-    # slightly less-rounded corners per your request
     return (
         f'<span style="display:inline-block;padding:2px 8px;'
-        f'border-radius:10px;background:{bg};color:{fg};'
+        f'border-radius:8px;background:{bg};color:{fg};'
         f'border:1px solid {border};font-size:12px;'
-        f'line-height:18px;white-space:nowrap;margin-right:6px;margin-bottom:4px;">{html_escape(text)}</span>'
+        f'line-height:18px;white-space:nowrap;">{html_escape(text)}</span>'
     )
 
 def dot_html(hex_color: str, size: int = 10, mr: int = 8) -> str:
@@ -69,25 +68,25 @@ def dot_html(hex_color: str, size: int = 10, mr: int = 8) -> str:
 def status_pill_component(text: str, kind: str = "success"):
     if kind == "success":
         style = {
-            "display": "inline-block", "padding": "2px 8px", "borderRadius": "10px",
+            "display": "inline-block", "padding": "2px 8px", "borderRadius": "999px",
             "background": "#e9f7ef", "color": "#0f5132", "border": "1px solid #badbcc",
             "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
         }
     elif kind == "danger":
         style = {
-            "display": "inline-block", "padding": "2px 8px", "borderRadius": "10px",
+            "display": "inline-block", "padding": "2px 8px", "borderRadius": "999px",
             "background": "#fdecea", "color": "#842029", "border": "1px solid #f5c2c7",
             "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
         }
     else:
         style = {
-            "display": "inline-block", "padding": "2px 8px", "borderRadius": "10px",
+            "display": "inline-block", "padding": "2px 8px", "borderRadius": "999px",
             "background": "#eef2f7", "color": "#111", "border": "1px solid #cfd6de",
             "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
         }
     return html.Span(text, style=style)
 
-# ───────────────────────── Signed-in name helpers ─────────────────────────
+# ───────────────────────── Signed-in helpers ─────────────────────────
 def _b64url_decode(part: str) -> bytes:
     part = part + '=' * (-len(part) % 4)
     return base64.urlsafe_b64decode(part.encode("utf-8"))
@@ -107,39 +106,101 @@ def _name_from_jwt(token: str) -> str:
     except Exception:
         return ""
 
-def _get_signed_in_name() -> str:
+def _fetch_me_response():
+    """
+    Robustly call /api/csiauth/me/:
+      1) Bearer header
+      2) access_token as query string
+      3) unauthenticated (if endpoint is public)
+    Returns the first successful requests.Response (or the last attempted response).
+    """
+    token = None
     try:
         token = auth.get_token()
-        if not token:
-            return ""
-        # Try Bearer
+    except Exception:
+        token = None
+
+    last_resp = None
+
+    if token:
         try:
-            r = requests.get(f"{SITE_URL}/api/csiauth/me/",
-                             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                             timeout=5)
+            r = requests.get(
+                f"{SITE_URL}/api/csiauth/me/",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                timeout=8,
+            )
             if r.status_code == 200:
+                return r
+            last_resp = r
+        except Exception:
+            pass
+
+        try:
+            r2 = requests.get(
+                f"{SITE_URL}/api/csiauth/me/",
+                params={"access_token": token},
+                headers={"Accept": "application/json"},
+                timeout=8,
+            )
+            if r2.status_code == 200:
+                return r2
+            last_resp = r2
+        except Exception:
+            pass
+
+    # Fallback unauthenticated
+    try:
+        r3 = requests.get(
+            f"{SITE_URL}/api/csiauth/me/",
+            headers={"Accept": "application/json"},
+            timeout=8,
+        )
+        return r3
+    except Exception:
+        return last_resp
+
+def _get_signed_in_name() -> str:
+    try:
+        r = _fetch_me_response()
+        if r is not None:
+            # Use JSON if available
+            try:
                 js = r.json()
                 first = (js.get("first_name") or "").strip()
                 last  = (js.get("last_name") or "").strip()
                 name = f"{first} {last}".strip() or js.get("email", "")
-                if name: return name
-        except Exception:
-            pass
-        # Try query param
+                if name:
+                    return name
+            except Exception:
+                pass
+        # JWT fallback
         try:
-            r2 = requests.get(f"{SITE_URL}/api/csiauth/me/", params={"access_token": token}, timeout=5)
-            if r2.status_code == 200:
-                js = r2.json()
-                first = (js.get("first_name") or "").strip()
-                last  = (js.get("last_name") or "").strip()
-                name = f"{first} {last}".strip() or js.get("email", "")
-                if name: return name
+            token = auth.get_token()
+            if token:
+                return _name_from_jwt(token)
         except Exception:
             pass
-        # JWT decode fallback
-        return _name_from_jwt(token) or ""
+        return ""
     except Exception:
         return ""
+
+def _pretty_response_text(resp):
+    """Pretty-print response as JSON if possible; otherwise return a readable text snippet."""
+    if resp is None:
+        return "No response."
+    ct = (resp.headers.get("content-type") or "").lower()
+    if "application/json" in ct:
+        try:
+            return json.dumps(resp.json(), indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+    try:
+        return json.dumps(resp.json(), indent=2, ensure_ascii=False)
+    except Exception:
+        text = (resp.text or "").strip()
+        if len(text) > 2000:
+            text = text[:2000] + "\n…(truncated)…"
+        return f"HTTP {resp.status_code} ({ct or 'no content-type'})\n\n{text}"
 
 # ───────────────────────── Tab 1 (Overview) ─────────────────────────
 def tab1_layout():
@@ -196,12 +257,12 @@ def tab1_layout():
                         {"name":"Athlete","id":"Athlete", "editable": False},
                         {"name":"Complaint","id":"Complaint", "editable": False},
                         {"name":"Status","id":"Status", "editable": False},
-                        {"name":"Comment","id":"Comment", "editable": True},
+                        {"name":"Comment","id":"Comment", "editable": True},  # ONLY this is editable
                         {"name":"_id","id":"_id", "hidden": True, "editable": False},
                     ],
                     data=[],
                     row_deletable=True,
-                    editable=False,  # only per-column overrides apply (Comment=True)
+                    # Table-level editable omitted => per-column editability applies
                     page_action="none",
                     style_table={"overflowX":"auto","maxHeight":"240px","overflowY":"auto"},
                     style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","lineHeight":"22px"},
@@ -214,28 +275,19 @@ def tab1_layout():
             ])
         ], className="mb-4"),
 
-        # Debug: signed-in JSON box
-        dbc.Card([
-            dbc.CardHeader("Signed-in JSON (debug)"),
-            dbc.CardBody([
-                dcc.Textarea(
-                    id="t1-auth-json-box",
-                    value="",
-                    readOnly=True,
-                    style={
-                        "width": "100%",
-                        "height": "220px",
-                        "fontFamily": "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-                        "fontSize": "12px",
-                        "whiteSpace": "pre",
-                        "backgroundColor": "#fafbfc",
-                        "border": "1px solid #e6ebf1",
-                        "borderRadius": "6px",
-                        "padding": "8px"
-                    },
-                )
-            ])
+        # ── Debug box for /api/csiauth/me/ ──
+        html.Hr(),
+        html.Div([
+            html.Div("Auth payload (/api/csiauth/me/)", className="fw-semibold mb-1"),
+            dcc.Textarea(
+                id="t1-auth-json-box",
+                readOnly=True,
+                style={"width":"100%","height":"180px","fontFamily":"ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                       "fontSize":"12px","whiteSpace":"pre","background":"#fbfbfd","border":"1px solid #e6ebf1",
+                       "borderRadius":"8px","padding":"8px"}
+            )
         ], className="mb-4"),
+
     ], fluid=True)
 
 # ───────────────────────── Tab 2 (Training Dashboard) ─────────────────────────
@@ -243,6 +295,30 @@ def tab2_layout():
     return td.layout_body()
 
 # ───────────────────────── App shell ─────────────────────────
+TAB_STYLE = {
+    "padding": "8px 14px",
+    "border": "1px solid #e6ebf1",
+    "borderBottom": "0",
+    "background": "#f8fafc",
+    "color": "#111",
+    "fontWeight": "500",
+    "borderTopLeftRadius": "10px",
+    "borderTopRightRadius": "10px",
+    "marginRight": "6px",
+}
+TAB_SELECTED_STYLE = {
+    **TAB_STYLE,
+    "background": "white",
+    "borderBottom": "2px solid white",
+    "boxShadow": "0 -2px 0 0 white inset",
+}
+TABS_PARENT_STYLE = {
+    "display": "flex",
+    "gap": "6px",
+    "borderBottom": "1px solid #e6ebf1",
+    "flexWrap": "wrap"
+}
+
 app = Dash(
     __name__,
     server=server,
@@ -262,11 +338,10 @@ app.layout = html.Div([
         dcc.Tabs(
             id="main-tabs", value="tab-1",
             children=[
-                dcc.Tab(label="Athlete Status", value="tab-1"),
-                dcc.Tab(label="Status History", value="tab-2"),
+                dcc.Tab(label="Athlete Status", value="tab-1", style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
+                dcc.Tab(label="Status History", value="tab-2", style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
             ],
-            className="w-100",
-            style={"width": "100%"},
+            parent_style=TABS_PARENT_STYLE,
         ),
         html.Div(id="tabs-content", className="mt-3"),
     ], fluid=True),
@@ -304,43 +379,6 @@ def refresh_user_badge(_n):
     except Exception:
         return html.A("Sign in", href="login", className="link-light")
 
-# Populate the debug JSON box (fires immediately, then every 60s)
-@app.callback(
-    Output("t1-auth-json-box", "value"),
-    Input("user-refresh", "n_intervals"),
-    prevent_initial_call=False
-)
-def refresh_auth_json(_n):
-    try:
-        token = auth.get_token()
-        if not token:
-            return "Not signed in."
-        # Prefer Authorization header
-        try:
-            r = requests.get(
-                f"{SITE_URL}/api/csiauth/me/",
-                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                timeout=5
-            )
-            if r.status_code == 200:
-                return json.dumps(r.json(), indent=2, ensure_ascii=False)
-        except Exception:
-            pass
-        # Fallback: token as query parameter
-        try:
-            r2 = requests.get(
-                f"{SITE_URL}/api/csiauth/me/",
-                params={"access_token": token},
-                timeout=5
-            )
-            if r2.status_code == 200:
-                return json.dumps(r2.json(), indent=2, ensure_ascii=False)
-            return f"HTTP {r2.status_code}: {r2.text[:500]}"
-        except Exception as e2:
-            return f"Error fetching /csiauth/me/ (query): {e2}"
-    except Exception as e:
-        return f"Error preparing auth call: {e}"
-
 # ───────────────────────── Tab 1: Load customers ─────────────────────────
 @app.callback(
     Output("t1-grid-container", "children"),
@@ -367,7 +405,7 @@ def t1_load_customers(n_clicks, group_values):
             first = (cust.get("first_name") or "").strip()
             last  = (cust.get("last_name") or "").strip()
 
-            # pills side-by-side; wrap on small screens
+            # groups (pills) — display inline and wrap on small widths
             groups_html = " ".join(
                 pill_html(g.title(), color_for_label(g)) for g in sorted(cust_groups)
             ) if cust_groups else "—"
@@ -556,10 +594,12 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
         prev_by_id = {r["_id"]: r for r in data_prev if r.get("_id") is not None}
         now_by_id  = {r["_id"]: r for r in data     if r.get("_id") is not None}
 
+        # Deletes: present before, missing now
         deleted_ids = [cid for cid in prev_by_id.keys() if cid not in now_by_id]
         for i in deleted_ids:
             _db_delete_comment(i)
 
+        # Edits: ONLY persist "Comment" diffs; ignore other columns
         any_edit = False
         for cid, now in now_by_id.items():
             before = prev_by_id.get(cid)
@@ -579,6 +619,28 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
             raise PreventUpdate
     except Exception as e:
         return status_pill_component(f"Comment persistence error: {e}", "danger")
+
+# ───────────────────────── /api/csiauth/me/ textbox refresher ─────────────────────────
+@app.callback(
+    Output("t1-auth-json-box", "value"),
+    Input("user-refresh", "n_intervals"),
+    prevent_initial_call=False
+)
+def refresh_auth_json(_n):
+    try:
+        token = None
+        try:
+            token = auth.get_token()
+        except Exception:
+            token = None
+
+        if not token:
+            return "Not signed in."
+
+        resp = _fetch_me_response()
+        return _pretty_response_text(resp)
+    except Exception as e:
+        return f"Error preparing auth call: {e}"
 
 # ───────────────────────── SQLite helpers (reuse td.DB_PATH) ─────────────────────────
 def _db_connect():
