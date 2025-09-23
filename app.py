@@ -332,56 +332,55 @@ def refresh_user_badge(_n):
     except Exception:
         return html.A("Sign in", href="login", className="link-light")
 
-# ───────────────────────── me() JSON viewer — CLIENTSIDE ─────────────────────────
-# We fetch from the browser so existing session cookies on apps.csipacific.ca are sent automatically.
+# ───────────────────────── me() JSON viewer — CLIENTSIDE (fixed) ─────────────────────────
 ME_URL = f"{SITE_URL}/api/csiauth/me/"
 
 app.clientside_callback(
-    f"""
-    async function(_tick, _init) {{
-      const url = "{ME_URL}";
-      try {{
-        const resp = await fetch(url, {{
-          credentials: "include",
-          mode: "cors",
-          headers: {{ "Accept": "application/json" }}
-        }});
-        const ct = resp.headers.get("content-type") || "";
-        const bodyText = await resp.text();
+    """
+    function(_tick, _init) {
+      const url = arguments[2]; // ME_URL is passed as State
+      return (async () => {
+        try {
+          const resp = await fetch(url, {
+            credentials: "include",
+            mode: "cors",
+            headers: { "Accept": "application/json" }
+          });
+          const status = resp.status;
+          const ct = resp.headers.get("content-type") || "";
+          const text = await resp.text();
+          const hint = `Tried **${url}** from the browser. Status **${status}**.  \n` +
+                       `(If blocked by CORS/third-party cookies, open the URL in a new tab while logged in.)`;
 
-        // Update hint (link + status)
-        const hintOk = `[Tried **{ME_URL}** from the browser. Status **${{resp.status}}**]  \n` +
-                       `(If blocked by CORS/third-party cookies, [open the URL in a new tab]({ME_URL}) while logged in.)`;
-
-        if (resp.ok && ct.startsWith("application/json")) {{
-          try {{
-            const js = JSON.parse(bodyText);
-            const pretty = JSON.stringify(js, null, 2);
-            window.dash_clientside.set_props("t1-me-hint", {{ "children": hintOk }});
-            return "[SOURCE: browser session cookie]\\n" + pretty;
-          }} catch(e) {{
-            window.dash_clientside.set_props("t1-me-hint", {{ "children": hintOk }});
-            return "[SOURCE: browser session cookie]\\nJSON parse error: " + e + "\\n\\nRaw body (truncated):\\n" + bodyText.slice(0, 2000);
-          }}
-        }} else {{
-          window.dash_clientside.set_props("t1-me-hint", {{ "children": hintOk }});
-          return "[SOURCE: browser session cookie]\\nUnexpected response. "
-               + "Status: " + resp.status + " " + resp.statusText + "\\n"
-               + "Content-Type: " + ct + "\\n\\nBody (truncated):\\n" + bodyText.slice(0, 2000);
-        }}
-      }} catch (e) {{
-        // Likely CORS/3rd-party cookie block
-        const msg = "**Fetch failed from the browser (likely CORS or third-party cookie policy).**  \\n" +
-                    f"**Tried URL:** [{ME_URL}]({ME_URL})";
-        window.dash_clientside.set_props("t1-me-hint", {{ "children": msg }});
-        return "[SOURCE: browser session cookie]\\nFetch error: " + e.toString() + "\\nTried URL: " + url;
-      }}
-    }}
+          if (resp.ok && ct.startsWith("application/json")) {
+            let pretty;
+            try {
+              pretty = JSON.stringify(JSON.parse(text), null, 2);
+            } catch(e) {
+              pretty = "JSON parse error: " + e + "\\n\\nRaw body (truncated):\\n" + text.slice(0, 2000);
+            }
+            return ["[SOURCE: browser session cookie]\\n" + pretty, hint];
+          } else {
+            const bodyPreview = text.slice(0, 2000);
+            const msg = "[SOURCE: browser session cookie]\\nUnexpected response. " +
+                        "Status: " + status + " " + resp.statusText + "\\n" +
+                        "Content-Type: " + ct + "\\n\\nBody (truncated):\\n" + bodyPreview;
+            return [msg, hint];
+          }
+        } catch (e) {
+          const hint = `**Fetch failed from the browser (likely CORS or third-party cookie policy).**  \\n` +
+                       `**Tried URL:** ${url}`;
+          const msg = "[SOURCE: browser session cookie]\\nFetch error: " + e.toString() + "\\nTried URL: " + url;
+          return [msg, hint];
+        }
+      })();
+    }
     """,
     Output("t1-me-json", "value"),
+    Output("t1-me-hint", "children"),
     Input("user-refresh", "n_intervals"),
     Input("init-interval", "n_intervals"),
-    prevent_initial_call=False,
+    State(component_id=None, component_property=None, **{"id": "ME_URL", "property": "value", "value": ME_URL})  # pass ME_URL as a State literal
 )
 
 # ───────────────────────── Tab 1: Load customers ─────────────────────────
