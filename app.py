@@ -1,5 +1,5 @@
 # app.py
-import os, hashlib, base64, sqlite3, traceback, json
+import os, hashlib, base64, sqlite3, traceback
 from datetime import date
 from html import escape as html_escape
 
@@ -110,7 +110,7 @@ def status_pill_component(text: str, kind: str = "success"):
         style = {
             "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
             "background": "#fdecea", "color": "#842029", "border": "1px solid #f5c2c7",
-            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
+            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
         }
     else:
         style = {
@@ -145,20 +145,17 @@ def _get_signed_in_name() -> str:
         token = auth.get_token()
         if not token:
             return ""
-        # Plain Bearer call only (no params)
+        # Try Bearer→JSON (works only if that API honors Bearer)
         try:
-            r = requests.get(
-                f"{SITE_URL}/api/csiauth/me/",
-                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                timeout=5,
-            )
+            r = requests.get(f"{SITE_URL}/api/csiauth/me/",
+                             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                             timeout=5)
             if r.status_code == 200 and r.headers.get("Content-Type","").startswith("application/json"):
                 js = r.json()
                 first = (js.get("first_name") or "").strip()
                 last  = (js.get("last_name") or "").strip()
                 name = f"{first} {last}".strip() or js.get("email", "")
-                if name:
-                    return name
+                if name: return name
         except Exception:
             pass
         # JWT decode fallback
@@ -239,9 +236,9 @@ def tab1_layout():
             ])
         ], className="mb-4"),
 
-        # ── Minimal addition: me() JSON viewer ─────────────────────────
+        # ── Minimal addition: me() JSON viewer (textarea + link)
         dbc.Card([
-            dbc.CardHeader("Auth / me() Debug (browser session cookie)"),
+            dbc.CardHeader("Auth / me() Debug"),
             dbc.CardBody([
                 dcc.Textarea(
                     id="t1-me-json",
@@ -254,7 +251,12 @@ def tab1_layout():
                         "fontSize": "12px",
                         "whiteSpace": "pre",
                     },
-                )
+                ),
+                dcc.Markdown(
+                    id="t1-me-hint",
+                    className="mt-2 text-muted",
+                    style={"fontSize":"12px"}
+                ),
             ])
         ], className="mb-4"),
         # ────────────────────────────────────────────────────────────────
@@ -330,32 +332,49 @@ def refresh_user_badge(_n):
     except Exception:
         return html.A("Sign in", href="login", className="link-light")
 
-# ───────────────────────── me() JSON viewer — CLIENTSIDE (uses browser cookies) ─────────────────────────
-# We fetch from the browser so existing session cookies are sent automatically.
+# ───────────────────────── me() JSON viewer — CLIENTSIDE ─────────────────────────
+# We fetch from the browser so existing session cookies on apps.csipacific.ca are sent automatically.
+ME_URL = f"{SITE_URL}/api/csiauth/me/"
+
 app.clientside_callback(
     f"""
     async function(_tick, _init) {{
+      const url = "{ME_URL}";
       try {{
-        const resp = await fetch("{SITE_URL}/api/csiauth/me/", {{
+        const resp = await fetch(url, {{
           credentials: "include",
+          mode: "cors",
           headers: {{ "Accept": "application/json" }}
         }});
         const ct = resp.headers.get("content-type") || "";
-        const body = await resp.text();
+        const bodyText = await resp.text();
+
+        // Update hint (link + status)
+        const hintOk = `[Tried **{ME_URL}** from the browser. Status **${{resp.status}}**]  \n` +
+                       `(If blocked by CORS/third-party cookies, [open the URL in a new tab]({ME_URL}) while logged in.)`;
+
         if (resp.ok && ct.startsWith("application/json")) {{
           try {{
-            const js = JSON.parse(body);
-            return "[SOURCE: browser session cookie]\\n" + JSON.stringify(js, null, 2);
+            const js = JSON.parse(bodyText);
+            const pretty = JSON.stringify(js, null, 2);
+            window.dash_clientside.set_props("t1-me-hint", {{ "children": hintOk }});
+            return "[SOURCE: browser session cookie]\\n" + pretty;
           }} catch(e) {{
-            return "[SOURCE: browser session cookie]\\nJSON parse error: " + e + "\\n\\nRaw body (truncated):\\n" + body.slice(0, 2000);
+            window.dash_clientside.set_props("t1-me-hint", {{ "children": hintOk }});
+            return "[SOURCE: browser session cookie]\\nJSON parse error: " + e + "\\n\\nRaw body (truncated):\\n" + bodyText.slice(0, 2000);
           }}
         }} else {{
+          window.dash_clientside.set_props("t1-me-hint", {{ "children": hintOk }});
           return "[SOURCE: browser session cookie]\\nUnexpected response. "
                + "Status: " + resp.status + " " + resp.statusText + "\\n"
-               + "Content-Type: " + ct + "\\n\\nBody (truncated):\\n" + body.slice(0, 2000);
+               + "Content-Type: " + ct + "\\n\\nBody (truncated):\\n" + bodyText.slice(0, 2000);
         }}
       }} catch (e) {{
-        return "[SOURCE: browser session cookie]\\nFetch error: " + e.toString();
+        // Likely CORS/3rd-party cookie block
+        const msg = "**Fetch failed from the browser (likely CORS or third-party cookie policy).**  \\n" +
+                    f"**Tried URL:** [{ME_URL}]({ME_URL})";
+        window.dash_clientside.set_props("t1-me-hint", {{ "children": msg }});
+        return "[SOURCE: browser session cookie]\\nFetch error: " + e.toString() + "\\nTried URL: " + url;
       }}
     }}
     """,
