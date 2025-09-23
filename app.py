@@ -145,7 +145,7 @@ def _get_signed_in_name() -> str:
         token = auth.get_token()
         if not token:
             return ""
-        # Plain Bearer call only (no params), as requested
+        # Plain Bearer call only (no params)
         try:
             r = requests.get(
                 f"{SITE_URL}/api/csiauth/me/",
@@ -241,11 +241,11 @@ def tab1_layout():
 
         # ── Minimal addition: me() JSON viewer ─────────────────────────
         dbc.Card([
-            dbc.CardHeader("Auth / me() Debug (Bearer only)"),
+            dbc.CardHeader("Auth / me() Debug (browser session cookie)"),
             dbc.CardBody([
                 dcc.Textarea(
                     id="t1-me-json",
-                    value="",
+                    value="Loading…",
                     readOnly=True,
                     style={
                         "width": "100%",
@@ -330,37 +330,40 @@ def refresh_user_badge(_n):
     except Exception:
         return html.A("Sign in", href="login", className="link-light")
 
-# ───────────────────────── me() JSON viewer callback (Bearer only) ─────────────────────────
-@app.callback(
+# ───────────────────────── me() JSON viewer — CLIENTSIDE (uses browser cookies) ─────────────────────────
+# We fetch from the browser so existing session cookies are sent automatically.
+app.clientside_callback(
+    f"""
+    async function(_tick, _init) {{
+      try {{
+        const resp = await fetch("{SITE_URL}/api/csiauth/me/", {{
+          credentials: "include",
+          headers: {{ "Accept": "application/json" }}
+        }});
+        const ct = resp.headers.get("content-type") || "";
+        const body = await resp.text();
+        if (resp.ok && ct.startsWith("application/json")) {{
+          try {{
+            const js = JSON.parse(body);
+            return "[SOURCE: browser session cookie]\\n" + JSON.stringify(js, null, 2);
+          }} catch(e) {{
+            return "[SOURCE: browser session cookie]\\nJSON parse error: " + e + "\\n\\nRaw body (truncated):\\n" + body.slice(0, 2000);
+          }}
+        }} else {{
+          return "[SOURCE: browser session cookie]\\nUnexpected response. "
+               + "Status: " + resp.status + " " + resp.statusText + "\\n"
+               + "Content-Type: " + ct + "\\n\\nBody (truncated):\\n" + body.slice(0, 2000);
+        }}
+      }} catch (e) {{
+        return "[SOURCE: browser session cookie]\\nFetch error: " + e.toString();
+      }}
+    }}
+    """,
     Output("t1-me-json", "value"),
     Input("user-refresh", "n_intervals"),
     Input("init-interval", "n_intervals"),
     prevent_initial_call=False,
 )
-def show_me_json(_tick, _init):
-    """Call exactly https://apps.csipacific.ca/api/csiauth/me/ with Bearer token only."""
-    try:
-        token = auth.get_token()
-        if not token:
-            return "No token available. Please sign in."
-        url = f"{SITE_URL}/api/csiauth/me/"
-        r = requests.get(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, timeout=8)
-        ct = r.headers.get("Content-Type", "")
-        if r.status_code == 200 and ct.startswith("application/json"):
-            try:
-                js = r.json()
-                pretty = json.dumps(js, indent=2, ensure_ascii=False)
-                return f"[SOURCE: Bearer only]\n{pretty}"
-            except Exception as e:
-                return f"[SOURCE: Bearer only]\nJSON parse error: {e}\n\nRaw body (truncated):\n{r.text[:2000]}"
-        else:
-            return (
-                "[SOURCE: Bearer only]\n"
-                f"Unexpected response.\nStatus: {r.status_code}\nContent-Type: {ct}\n\n"
-                f"Body (truncated):\n{r.text[:2000]}"
-            )
-    except Exception as e:
-        return f"[SOURCE: Bearer only]\nRequest error: {e}"
 
 # ───────────────────────── Tab 1: Load customers ─────────────────────────
 @app.callback(
