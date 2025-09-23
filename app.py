@@ -1,5 +1,5 @@
 # app.py
-import os, hashlib, base64, sqlite3, traceback
+import os, hashlib, base64, sqlite3, traceback, json
 from datetime import date
 from html import escape as html_escape
 
@@ -103,14 +103,14 @@ def status_pill_component(text: str, kind: str = "success"):
     if kind == "success":
         style = {
             "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
-            "background": "#e9f7ef", "color": "#0f5132", "border": "1px solid #badbcc",
-            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
+            "background": "#e9f7ef", "color": "#0f5132", "border": "1px solid #baddcc",
+            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
         }
     elif kind == "danger":
         style = {
             "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
             "background": "#fdecea", "color": "#842029", "border": "1px solid #f5c2c7",
-            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
+            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
         }
     else:
         style = {
@@ -145,13 +145,25 @@ def _get_signed_in_name() -> str:
         token = auth.get_token()
         if not token:
             return ""
-        # Try Bearer→JSON (works only if that API honors Bearer)
+        # Try Bearer
         try:
             r = requests.get(f"{SITE_URL}/api/csiauth/me/",
                              headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                             timeout=5)
-            if r.status_code == 200 and r.headers.get("Content-Type","").startswith("application/json"):
+                             timeout=5, allow_redirects=False)
+            if r.status_code == 200 and r.headers.get("content-type","").startswith("application/json"):
                 js = r.json()
+                first = (js.get("first_name") or "").strip()
+                last  = (js.get("last_name") or "").strip()
+                name = f"{first} {last}".strip() or js.get("email", "")
+                if name: return name
+        except Exception:
+            pass
+        # Try query param
+        try:
+            r2 = requests.get(f"{SITE_URL}/api/csiauth/me/", params={"access_token": token},
+                              timeout=5, allow_redirects=False)
+            if r2.status_code == 200 and r2.headers.get("content-type","").startswith("application/json"):
+                js = r2.json()
                 first = (js.get("first_name") or "").strip()
                 last  = (js.get("last_name") or "").strip()
                 name = f"{first} {last}".strip() or js.get("email", "")
@@ -162,6 +174,67 @@ def _get_signed_in_name() -> str:
         return _name_from_jwt(token) or ""
     except Exception:
         return ""
+
+# ───────────────────────── Diagnostics helper (SERVER-SIDE) ─────────────────────────
+def _diagnose_me_endpoint() -> str:
+    """
+    Hit /api/csiauth/me/ four ways (no browser/CORS involved) and report
+    status, content-type, redirect location and JSON success.
+    """
+    url = f"{SITE_URL}/api/csiauth/me/"
+    lines = [f"Diagnostics for {url}", "-" * 64]
+    try:
+        token = auth.get_token()
+    except Exception:
+        token = None
+
+    def attempt(label, method="GET", params=None, headers=None):
+        try:
+            r = requests.request(method, url, params=params or {}, headers=headers or {},
+                                 timeout=8, allow_redirects=False)
+            ctype = r.headers.get("content-type", "")
+            loc   = r.headers.get("location", "")
+            body_preview = r.text[:200].replace("\n"," ")
+            json_ok = False
+            parsed = None
+            if r.status_code == 200 and ctype.startswith("application/json"):
+                try:
+                    parsed = r.json()
+                    json_ok = True
+                except Exception:
+                    json_ok = False
+            lines.append(f"[{label}] status={r.status_code}, content_type={ctype or '∅'}, location={loc or '∅'}")
+            if json_ok:
+                pretty = json.dumps(parsed, indent=2)[:800]
+                lines.append(pretty)
+            else:
+                lines.append(f"(non-JSON or parse failed) body≈ {body_preview}")
+        except Exception as e:
+            lines.append(f"[{label}] EXCEPTION: {e}")
+
+    # 1) Bearer only
+    if token:
+        attempt("Bearer", headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
+        # 2) Bearer + format=json (if supported)
+        attempt("Bearer+format=json",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                params={"format": "json"})
+    else:
+        lines.append("[warning] No auth token available from DashAuthExternal.")
+
+    # 3) access_token query only
+    if token:
+        attempt("access_token", params={"access_token": token})
+        attempt("access_token+format=json", params={"access_token": token, "format": "json"})
+    else:
+        attempt("anonymous (no token)")
+
+    # Summary hint
+    lines.append("-" * 64)
+    lines.append("Note: These are server-side requests (no CORS). If you see 302/HTML here,")
+    lines.append("the API is redirecting non-cookie requests. To make this return JSON to the app,")
+    lines.append("the API must either accept Authorization: Bearer or be same-origin with the Dash app.")
+    return "\n".join(lines)
 
 # ───────────────────────── Tab 1 (Overview) ─────────────────────────
 def tab1_layout():
@@ -236,29 +309,16 @@ def tab1_layout():
             ])
         ], className="mb-4"),
 
-        # ── me() JSON viewer
-        dbc.Card([
-            dbc.CardHeader("Auth / me() Debug"),
-            dbc.CardBody([
-                dcc.Textarea(
-                    id="t1-me-json",
-                    value="Loading…",
-                    readOnly=True,
-                    style={
-                        "width": "100%",
-                        "height": "220px",
-                        "fontFamily": "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
-                        "fontSize": "12px",
-                        "whiteSpace": "pre",
-                    },
-                ),
-                dcc.Markdown(
-                    id="t1-me-hint",
-                    className="mt-2 text-muted",
-                    style={"fontSize":"12px"}
-                ),
-            ])
+        # ── Minimal diagnostics block (server-side) ──
+        html.Hr(),
+        html.Div([
+            html.Div("Debug: /api/csiauth/me/ (server-side)", className="fw-semibold mb-1"),
+            dbc.Button("Run /me diagnostics", id="t1-me-test", size="sm", color="secondary", className="mb-2"),
+            html.Pre(id="t1-me-output",
+                     style={"whiteSpace":"pre-wrap","fontSize":"12px","background":"#f8f9fa",
+                            "padding":"8px","border":"1px solid #eee", "minHeight":"40px"})
         ], className="mb-4"),
+
     ], fluid=True)
 
 # ───────────────────────── Tab 2 (Training Dashboard) ─────────────────────────
@@ -274,16 +334,10 @@ app = Dash(
     suppress_callback_exceptions=True,
 )
 
-# Pass the URL via a Store (so we can use it in State)
-ME_URL = f"{SITE_URL}/api/csiauth/me/"
-
 app.layout = html.Div([
     dcc.Location(id="redirect-to", refresh=True),
     dcc.Interval(id="init-interval", interval=500, n_intervals=0, max_intervals=1),
     dcc.Interval(id="user-refresh", interval=60_000, n_intervals=0),
-
-    # Store for the me() URL (fix for the State literal bug)
-    dcc.Store(id="me-url", data=ME_URL),
 
     Navbar([html.Span(id="navbar-user", className="text-white-50 small", children="")]).render(),
 
@@ -336,54 +390,6 @@ def refresh_user_badge(_n):
         return f"Signed in as: {name}" if name else html.A("Sign in", href="login", className="link-light")
     except Exception:
         return html.A("Sign in", href="login", className="link-light")
-
-# ───────────────────────── me() JSON viewer — CLIENTSIDE ─────────────────────────
-app.clientside_callback(
-    """
-    function(_tick1, _tick2, url) {
-      return (async () => {
-        try {
-          const resp = await fetch(url, {
-            credentials: "include",
-            mode: "cors",
-            headers: { "Accept": "application/json" }
-          });
-          const status = resp.status;
-          const ct = resp.headers.get("content-type") || "";
-          const text = await resp.text();
-          const hint = `Tried **${url}** from the browser. Status **${status}**.  \\n` +
-                       `(If blocked by CORS/third-party cookies, open the URL in a new tab while logged in.)`;
-
-          if (resp.ok && ct.startsWith("application/json")) {
-            let pretty;
-            try {
-              pretty = JSON.stringify(JSON.parse(text), null, 2);
-            } catch(e) {
-              pretty = "JSON parse error: " + e + "\\n\\nRaw body (truncated):\\n" + text.slice(0, 2000);
-            }
-            return ["[SOURCE: browser session cookie]\\n" + pretty, hint];
-          } else {
-            const bodyPreview = text.slice(0, 2000);
-            const msg = "[SOURCE: browser session cookie]\\nUnexpected response. " +
-                        "Status: " + status + " " + resp.statusText + "\\n" +
-                        "Content-Type: " + ct + "\\n\\nBody (truncated):\\n" + bodyPreview;
-            return [msg, hint];
-          }
-        } catch (e) {
-          const hint = `**Fetch failed from the browser (likely CORS or third-party cookie policy).**  \\n` +
-                       `**Tried URL:** ${url}`;
-          const msg = "[SOURCE: browser session cookie]\\nFetch error: " + e.toString() + "\\nTried URL: " + url;
-          return [msg, hint];
-        }
-      })();
-    }
-    """,
-    Output("t1-me-json", "value"),
-    Output("t1-me-hint", "children"),
-    Input("user-refresh", "n_intervals"),
-    Input("init-interval", "n_intervals"),
-    State("me-url", "data"),
-)
 
 # ───────────────────────── Tab 1: Load customers ─────────────────────────
 @app.callback(
@@ -623,6 +629,19 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
             raise PreventUpdate
     except Exception as e:
         return status_pill_component(f"Comment persistence error: {e}", "danger")
+
+# ───────────────────────── NEW: /me diagnostics callback ─────────────────────────
+@app.callback(
+    Output("t1-me-output", "children"),
+    Input("t1-me-test", "n_clicks"),
+    prevent_initial_call=True,
+)
+def run_me_diagnostics(_n):
+    try:
+        return _diagnose_me_endpoint()
+    except Exception as e:
+        tb = traceback.format_exc()
+        return f"Diagnostics error: {e}\n{tb}"
 
 # ───────────────────────── SQLite helpers (reuse td.DB_PATH) ─────────────────────────
 def _db_connect():
