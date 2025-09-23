@@ -1,5 +1,5 @@
 # app.py
-import os, hashlib, base64, sqlite3, traceback, json   # ← added json
+import os, hashlib, base64, sqlite3, traceback
 from datetime import date
 from html import escape as html_escape
 
@@ -104,7 +104,7 @@ def status_pill_component(text: str, kind: str = "success"):
         style = {
             "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
             "background": "#e9f7ef", "color": "#0f5132", "border": "1px solid #badbcc",
-            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
+            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
         }
     elif kind == "danger":
         style = {
@@ -247,18 +247,19 @@ def tab1_layout():
             ])
         ], className="mb-4"),
 
-        # ── Minimal addition: read-only textbox that prints /api/csiauth/me/ JSON ──
-        html.Hr(),
-        html.Div([
-            html.Div("Auth payload (/api/csiauth/me/)", className="fw-semibold mb-1"),
-            dcc.Textarea(
-                id="t1-auth-json-box",
-                readOnly=True,
-                value="Loading…",
-                style={"width":"100%","height":"180px","fontFamily":"ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-                       "fontSize":"12px","whiteSpace":"pre","background":"#fbfbfd","border":"1px solid #e6ebf1",
-                       "borderRadius":"8px","padding":"8px"}
-            )
+        # ── Minimal addition: show /api/csiauth/me/ JSON + which attempt worked
+        dbc.Card([
+            dbc.CardHeader("Current User JSON (/api/csiauth/me/)"),
+            dbc.CardBody([
+                dcc.Textarea(
+                    id="t1-auth-json-box",
+                    value="",
+                    readOnly=True,
+                    style={"width":"100%","height":"180px","fontFamily":"ui-monospace, Menlo, Consolas, monospace",
+                           "fontSize":"12px"}
+                ),
+                html.Div(id="t1-auth-json-meta", className="text-muted mt-1", style={"fontSize":"12px"})
+            ])
         ], className="mb-4"),
 
     ], fluid=True)
@@ -332,6 +333,110 @@ def refresh_user_badge(_n):
         return f"Signed in as: {name}" if name else html.A("Sign in", href="login", className="link-light")
     except Exception:
         return html.A("Sign in", href="login", className="link-light")
+
+# ───────────────────────── Minimal new callback: fetch /api/csiauth/me/ JSON ─────────────────────────
+@app.callback(
+    Output("t1-auth-json-box", "value"),
+    Output("t1-auth-json-meta", "children"),
+    Input("user-refresh", "n_intervals"),
+    prevent_initial_call=False
+)
+def refresh_auth_json(_n):
+    import json
+
+    def _pretty_or_json_text(resp):
+        """Return pretty JSON string if the response body contains JSON; else None."""
+        try:
+            ct = (resp.headers.get("Content-Type") or "").lower()
+            if "application/json" in ct:
+                return json.dumps(resp.json(), indent=2, ensure_ascii=False)
+            txt = (resp.text or "").strip()
+            if (txt.startswith("{") and txt.endswith("}")) or (txt.startswith("[") and txt.endswith("]")):
+                return json.dumps(json.loads(txt), indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+        return None
+
+    def _attempt(name, url, headers=None, params=None):
+        try:
+            r = requests.get(
+                url,
+                headers=headers or {},
+                params=params or {},
+                timeout=6,
+                allow_redirects=False,  # avoid HTML login pages
+            )
+            return name, r
+        except Exception as e:
+            return name, e
+
+    try:
+        token = None
+        try:
+            token = auth.get_token()
+        except Exception:
+            token = None
+
+        if not token:
+            return "Not signed in.", "worked=none (no token)"
+
+        base_url = f"{SITE_URL}/api/csiauth/me/"
+
+        attempts = [
+            ("Bearer", dict(url=base_url,
+                            headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
+                                     "X-Requested-With": "XMLHttpRequest"})),
+            ("Bearer+format=json", dict(url=base_url,
+                                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
+                                                 "X-Requested-With": "XMLHttpRequest"},
+                                        params={"format": "json"})),
+            ("access_token", dict(url=base_url,
+                                  headers={"Accept": "application/json", "X-Requested-With": "XMLHttpRequest"},
+                                  params={"access_token": token})),
+            ("access_token+format=json", dict(url=base_url,
+                                              headers={"Accept": "application/json", "X-Requested-With": "XMLHttpRequest"},
+                                              params={"access_token": token, "format": "json"})),
+        ]
+
+        diagnostics = []
+        for label, kwargs in attempts:
+            name, result = _attempt(label, **kwargs)
+            if isinstance(result, Exception):
+                diagnostics.append(f"{name}: error {type(result).__name__}: {result}")
+                continue
+            pretty = _pretty_or_json_text(result)
+            if pretty is not None:
+                return pretty, f"worked={name} (status={result.status_code})"
+            loc = result.headers.get("Location")
+            ct  = result.headers.get("Content-Type")
+            diagnostics.append(f"{name}: status={result.status_code}, content_type={ct or '-'}, location={loc or '-'}")
+
+        # Fallback: decode JWT payload so you still see something useful
+        try:
+            parts = token.split(".")
+            if len(parts) >= 2:
+                def _b64url_decode(s):
+                    s = s + "=" * (-len(s) % 4)
+                    return base64.urlsafe_b64decode(s.encode("utf-8"))
+                payload = json.loads(_b64url_decode(parts[1]).decode("utf-8"))
+                jwt_preview = json.dumps(payload, indent=2, ensure_ascii=False)
+            else:
+                jwt_preview = "(unavailable)"
+        except Exception:
+            jwt_preview = "(unavailable)"
+
+        diag = "\n".join(diagnostics) if diagnostics else "(no diagnostics)"
+        text = (
+            "Could not fetch JSON from /api/csiauth/me/.\n"
+            "API likely returned HTML or a redirect requiring a browser session.\n\n"
+            f"Attempts:\n{diag}\n\n"
+            "JWT payload preview (decoded from current token):\n"
+            f"{jwt_preview}"
+        )
+        return text, "worked=none"
+
+    except Exception as e:
+        return f"Error fetching /csiauth/me/: {e}", "worked=error"
 
 # ───────────────────────── Tab 1: Load customers ─────────────────────────
 @app.callback(
@@ -571,78 +676,6 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
             raise PreventUpdate
     except Exception as e:
         return status_pill_component(f"Comment persistence error: {e}", "danger")
-
-# ───────────────────────── Minimal new callback: fetch /api/csiauth/me/ JSON ─────────────────────────
-@app.callback(
-    Output("t1-auth-json-box", "value"),
-    Input("user-refresh", "n_intervals"),
-    prevent_initial_call=False
-)
-def refresh_auth_json(_n):
-    try:
-        token = None
-        try:
-            token = auth.get_token()
-        except Exception:
-            token = None
-
-        # If not signed in, say so
-        if not token:
-            return "Not signed in."
-
-        # 1) Bearer header
-        try:
-            r = requests.get(
-                f"{SITE_URL}/api/csiauth/me/",
-                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                timeout=6
-            )
-            if r.status_code == 200:
-                try:
-                    return json.dumps(r.json(), indent=2, ensure_ascii=False)
-                except Exception:
-                    return r.text or "(empty)"
-            bearer_status = r.status_code
-        except Exception as e:
-            bearer_status = f"error: {e}"
-
-        # 2) access_token as query param
-        try:
-            r2 = requests.get(
-                f"{SITE_URL}/api/csiauth/me/",
-                params={"access_token": token},
-                headers={"Accept": "application/json"},
-                timeout=6
-            )
-            if r2.status_code == 200:
-                try:
-                    return json.dumps(r2.json(), indent=2, ensure_ascii=False)
-                except Exception:
-                    return r2.text or "(empty)"
-            query_status = r2.status_code
-        except Exception as e:
-            query_status = f"error: {e}"
-
-        # 3) Fallback unauthenticated (in case endpoint is public)
-        try:
-            r3 = requests.get(
-                f"{SITE_URL}/api/csiauth/me/",
-                headers={"Accept": "application/json"},
-                timeout=6
-            )
-            if r3.status_code == 200:
-                try:
-                    return json.dumps(r3.json(), indent=2, ensure_ascii=False)
-                except Exception:
-                    return r3.text or "(empty)"
-            public_status = r3.status_code
-        except Exception as e:
-            public_status = f"error: {e}"
-
-        return f"Could not fetch /csiauth/me/. Bearer={bearer_status}, query={query_status}, public={public_status}"
-
-    except Exception as e:
-        return f"Error fetching /csiauth/me/: {e}"
 
 # ───────────────────────── SQLite helpers (reuse td.DB_PATH) ─────────────────────────
 def _db_connect():
