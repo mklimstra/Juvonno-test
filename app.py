@@ -1,5 +1,5 @@
-# good app.py
-import os, hashlib, base64, sqlite3, traceback
+# app.py
+import os, hashlib, base64, sqlite3, traceback, json   # ← added json
 from datetime import date
 from html import escape as html_escape
 
@@ -104,13 +104,13 @@ def status_pill_component(text: str, kind: str = "success"):
         style = {
             "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
             "background": "#e9f7ef", "color": "#0f5132", "border": "1px solid #badbcc",
-            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
+            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
         }
     elif kind == "danger":
         style = {
             "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
             "background": "#fdecea", "color": "#842029", "border": "1px solid #f5c2c7",
-            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
+            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
         }
     else:
         style = {
@@ -246,6 +246,21 @@ def tab1_layout():
                 ),
             ])
         ], className="mb-4"),
+
+        # ── Minimal addition: read-only textbox that prints /api/csiauth/me/ JSON ──
+        html.Hr(),
+        html.Div([
+            html.Div("Auth payload (/api/csiauth/me/)", className="fw-semibold mb-1"),
+            dcc.Textarea(
+                id="t1-auth-json-box",
+                readOnly=True,
+                value="Loading…",
+                style={"width":"100%","height":"180px","fontFamily":"ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                       "fontSize":"12px","whiteSpace":"pre","background":"#fbfbfd","border":"1px solid #e6ebf1",
+                       "borderRadius":"8px","padding":"8px"}
+            )
+        ], className="mb-4"),
+
     ], fluid=True)
 
 # ───────────────────────── Tab 2 (Training Dashboard) ─────────────────────────
@@ -556,6 +571,78 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
             raise PreventUpdate
     except Exception as e:
         return status_pill_component(f"Comment persistence error: {e}", "danger")
+
+# ───────────────────────── Minimal new callback: fetch /api/csiauth/me/ JSON ─────────────────────────
+@app.callback(
+    Output("t1-auth-json-box", "value"),
+    Input("user-refresh", "n_intervals"),
+    prevent_initial_call=False
+)
+def refresh_auth_json(_n):
+    try:
+        token = None
+        try:
+            token = auth.get_token()
+        except Exception:
+            token = None
+
+        # If not signed in, say so
+        if not token:
+            return "Not signed in."
+
+        # 1) Bearer header
+        try:
+            r = requests.get(
+                f"{SITE_URL}/api/csiauth/me/",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                timeout=6
+            )
+            if r.status_code == 200:
+                try:
+                    return json.dumps(r.json(), indent=2, ensure_ascii=False)
+                except Exception:
+                    return r.text or "(empty)"
+            bearer_status = r.status_code
+        except Exception as e:
+            bearer_status = f"error: {e}"
+
+        # 2) access_token as query param
+        try:
+            r2 = requests.get(
+                f"{SITE_URL}/api/csiauth/me/",
+                params={"access_token": token},
+                headers={"Accept": "application/json"},
+                timeout=6
+            )
+            if r2.status_code == 200:
+                try:
+                    return json.dumps(r2.json(), indent=2, ensure_ascii=False)
+                except Exception:
+                    return r2.text or "(empty)"
+            query_status = r2.status_code
+        except Exception as e:
+            query_status = f"error: {e}"
+
+        # 3) Fallback unauthenticated (in case endpoint is public)
+        try:
+            r3 = requests.get(
+                f"{SITE_URL}/api/csiauth/me/",
+                headers={"Accept": "application/json"},
+                timeout=6
+            )
+            if r3.status_code == 200:
+                try:
+                    return json.dumps(r3.json(), indent=2, ensure_ascii=False)
+                except Exception:
+                    return r3.text or "(empty)"
+            public_status = r3.status_code
+        except Exception as e:
+            public_status = f"error: {e}"
+
+        return f"Could not fetch /csiauth/me/. Bearer={bearer_status}, query={query_status}, public={public_status}"
+
+    except Exception as e:
+        return f"Error fetching /csiauth/me/: {e}"
 
 # ───────────────────────── SQLite helpers (reuse td.DB_PATH) ─────────────────────────
 def _db_connect():
