@@ -1,5 +1,5 @@
 # app.py
-import os, hashlib, base64, sqlite3, traceback
+import os, hashlib, base64, sqlite3, traceback, json
 from datetime import date
 from html import escape as html_escape
 
@@ -37,42 +37,8 @@ try:
 except Exception:
     pass
 
-# ───────────────────────── Styles (tabs & pills) ─────────────────────────
-TABS_CONTAINER_STYLE = {
-    "display": "flex",            # keep horizontal
-    "gap": "6px",
-    "alignItems": "center",
-    "borderBottom": "0",
-    "marginBottom": "4px",
-    "width": "100%",
-}
-
-TAB_STYLE = {
-    "padding": "8px 14px",
-    "border": "1px solid #e9ecef",
-    "borderRadius": "8px",
-    "background": "#f8f9fb",
-    "color": "#495057",
-    "fontWeight": "500",
-    "flex": "1 1 0%",             # stretch across the row
-    "textAlign": "center",
-}
-
-TAB_SELECTED_STYLE = {
-    "padding": "8px 14px",
-    "border": "1px solid #cfe2ff",
-    "borderRadius": "8px",
-    "background": "#e7f1ff",
-    "color": "#084298",
-    "fontWeight": "600",
-    "boxShadow": "inset 0 1px 0 rgba(255,255,255,.6)",
-    "flex": "1 1 0%",
-    "textAlign": "center",
-}
-
 # ───────────────────────── UI helpers (pills/dots/colors) ─────────────────────────
 PILL_BG_DEFAULT = "#eef2f7"
-PILL_BORDER_RADIUS = "6px"  # less rounded corners
 PALETTE = ["#e7f0ff", "#fde2cf", "#e6f3e6", "#f3e6f7", "#fff3cd", "#e0f7fa", "#fbe7eb", "#e7f5ff"]
 BORDER = "#cfd6de"
 
@@ -85,11 +51,12 @@ def color_for_label(text: str) -> str:
 
 def pill_html(text: str, bg=None, fg="#111", border=BORDER) -> str:
     bg = bg or PILL_BG_DEFAULT
+    # slightly less-rounded corners per your request
     return (
         f'<span style="display:inline-block;padding:2px 8px;'
-        f'border-radius:{PILL_BORDER_RADIUS};background:{bg};color:{fg};'
+        f'border-radius:10px;background:{bg};color:{fg};'
         f'border:1px solid {border};font-size:12px;'
-        f'line-height:18px;white-space:nowrap;">{html_escape(text)}</span>'
+        f'line-height:18px;white-space:nowrap;margin-right:6px;margin-bottom:4px;">{html_escape(text)}</span>'
     )
 
 def dot_html(hex_color: str, size: int = 10, mr: int = 8) -> str:
@@ -102,19 +69,19 @@ def dot_html(hex_color: str, size: int = 10, mr: int = 8) -> str:
 def status_pill_component(text: str, kind: str = "success"):
     if kind == "success":
         style = {
-            "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
+            "display": "inline-block", "padding": "2px 8px", "borderRadius": "10px",
             "background": "#e9f7ef", "color": "#0f5132", "border": "1px solid #badbcc",
             "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
         }
     elif kind == "danger":
         style = {
-            "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
+            "display": "inline-block", "padding": "2px 8px", "borderRadius": "10px",
             "background": "#fdecea", "color": "#842029", "border": "1px solid #f5c2c7",
             "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
         }
     else:
         style = {
-            "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
+            "display": "inline-block", "padding": "2px 8px", "borderRadius": "10px",
             "background": "#eef2f7", "color": "#111", "border": "1px solid #cfd6de",
             "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
         }
@@ -130,7 +97,7 @@ def _name_from_jwt(token: str) -> str:
         parts = token.split(".")
         if len(parts) < 2: return ""
         payload = _b64url_decode(parts[1]).decode("utf-8")
-        js = __import__("json").loads(payload)
+        js = json.loads(payload)
         first = (js.get("given_name") or js.get("first_name") or "").strip()
         last  = (js.get("family_name") or js.get("last_name") or "").strip()
         name  = (f"{first} {last}").strip() or js.get("name") or ""
@@ -229,12 +196,12 @@ def tab1_layout():
                         {"name":"Athlete","id":"Athlete", "editable": False},
                         {"name":"Complaint","id":"Complaint", "editable": False},
                         {"name":"Status","id":"Status", "editable": False},
-                        {"name":"Comment","id":"Comment", "editable": True},   # ONLY this is editable
+                        {"name":"Comment","id":"Comment", "editable": True},
                         {"name":"_id","id":"_id", "hidden": True, "editable": False},
                     ],
                     data=[],
                     row_deletable=True,
-                    editable=False,   # column-level 'editable' overrides; keep others locked
+                    editable=False,  # only per-column overrides apply (Comment=True)
                     page_action="none",
                     style_table={"overflowX":"auto","maxHeight":"240px","overflowY":"auto"},
                     style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","lineHeight":"22px"},
@@ -244,6 +211,29 @@ def tab1_layout():
                     style_data={"borderBottom":"1px solid #eceff4"},
                     style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
                 ),
+            ])
+        ], className="mb-4"),
+
+        # Debug: signed-in JSON box
+        dbc.Card([
+            dbc.CardHeader("Signed-in JSON (debug)"),
+            dbc.CardBody([
+                dcc.Textarea(
+                    id="t1-auth-json-box",
+                    value="",
+                    readOnly=True,
+                    style={
+                        "width": "100%",
+                        "height": "220px",
+                        "fontFamily": "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                        "fontSize": "12px",
+                        "whiteSpace": "pre",
+                        "backgroundColor": "#fafbfc",
+                        "border": "1px solid #e6ebf1",
+                        "borderRadius": "6px",
+                        "padding": "8px"
+                    },
+                )
             ])
         ], className="mb-4"),
     ], fluid=True)
@@ -270,17 +260,13 @@ app.layout = html.Div([
 
     dbc.Container([
         dcc.Tabs(
-            id="main-tabs",
-            value="tab-1",
+            id="main-tabs", value="tab-1",
             children=[
-                dcc.Tab(label="Athlete Status", value="tab-1",
-                        style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
-                dcc.Tab(label="Status History", value="tab-2",
-                        style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
+                dcc.Tab(label="Athlete Status", value="tab-1"),
+                dcc.Tab(label="Status History", value="tab-2"),
             ],
-            style=TABS_CONTAINER_STYLE,         # horizontal tab bar
-            parent_style={"width": "100%"},
-            mobile_breakpoint=0,                # never stack vertically
+            className="w-100",
+            style={"width": "100%"},
         ),
         html.Div(id="tabs-content", className="mt-3"),
     ], fluid=True),
@@ -318,6 +304,43 @@ def refresh_user_badge(_n):
     except Exception:
         return html.A("Sign in", href="login", className="link-light")
 
+# Populate the debug JSON box (fires immediately, then every 60s)
+@app.callback(
+    Output("t1-auth-json-box", "value"),
+    Input("user-refresh", "n_intervals"),
+    prevent_initial_call=False
+)
+def refresh_auth_json(_n):
+    try:
+        token = auth.get_token()
+        if not token:
+            return "Not signed in."
+        # Prefer Authorization header
+        try:
+            r = requests.get(
+                f"{SITE_URL}/api/csiauth/me/",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                timeout=5
+            )
+            if r.status_code == 200:
+                return json.dumps(r.json(), indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+        # Fallback: token as query parameter
+        try:
+            r2 = requests.get(
+                f"{SITE_URL}/api/csiauth/me/",
+                params={"access_token": token},
+                timeout=5
+            )
+            if r2.status_code == 200:
+                return json.dumps(r2.json(), indent=2, ensure_ascii=False)
+            return f"HTTP {r2.status_code}: {r2.text[:500]}"
+        except Exception as e2:
+            return f"Error fetching /csiauth/me/ (query): {e2}"
+    except Exception as e:
+        return f"Error preparing auth call: {e}"
+
 # ───────────────────────── Tab 1: Load customers ─────────────────────────
 @app.callback(
     Output("t1-grid-container", "children"),
@@ -344,6 +367,7 @@ def t1_load_customers(n_clicks, group_values):
             first = (cust.get("first_name") or "").strip()
             last  = (cust.get("last_name") or "").strip()
 
+            # pills side-by-side; wrap on small screens
             groups_html = " ".join(
                 pill_html(g.title(), color_for_label(g)) for g in sorted(cust_groups)
             ) if cust_groups else "—"
@@ -541,7 +565,6 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
             before = prev_by_id.get(cid)
             if not before:
                 continue
-            # Only Comment is editable; check and persist if changed
             if (before.get("Comment") or "") != (now.get("Comment") or ""):
                 _db_update_comment_text(cid, now.get("Comment") or "")
                 any_edit = True
