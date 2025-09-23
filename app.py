@@ -236,7 +236,7 @@ def tab1_layout():
             ])
         ], className="mb-4"),
 
-        # ── Minimal addition: me() JSON viewer (textarea + link)
+        # ── me() JSON viewer
         dbc.Card([
             dbc.CardHeader("Auth / me() Debug"),
             dbc.CardBody([
@@ -259,7 +259,6 @@ def tab1_layout():
                 ),
             ])
         ], className="mb-4"),
-        # ────────────────────────────────────────────────────────────────
     ], fluid=True)
 
 # ───────────────────────── Tab 2 (Training Dashboard) ─────────────────────────
@@ -275,10 +274,16 @@ app = Dash(
     suppress_callback_exceptions=True,
 )
 
+# Pass the URL via a Store (so we can use it in State)
+ME_URL = f"{SITE_URL}/api/csiauth/me/"
+
 app.layout = html.Div([
     dcc.Location(id="redirect-to", refresh=True),
     dcc.Interval(id="init-interval", interval=500, n_intervals=0, max_intervals=1),
     dcc.Interval(id="user-refresh", interval=60_000, n_intervals=0),
+
+    # Store for the me() URL (fix for the State literal bug)
+    dcc.Store(id="me-url", data=ME_URL),
 
     Navbar([html.Span(id="navbar-user", className="text-white-50 small", children="")]).render(),
 
@@ -332,13 +337,10 @@ def refresh_user_badge(_n):
     except Exception:
         return html.A("Sign in", href="login", className="link-light")
 
-# ───────────────────────── me() JSON viewer — CLIENTSIDE (fixed) ─────────────────────────
-ME_URL = f"{SITE_URL}/api/csiauth/me/"
-
+# ───────────────────────── me() JSON viewer — CLIENTSIDE ─────────────────────────
 app.clientside_callback(
     """
-    function(_tick, _init) {
-      const url = arguments[2]; // ME_URL is passed as State
+    function(_tick1, _tick2, url) {
       return (async () => {
         try {
           const resp = await fetch(url, {
@@ -349,7 +351,7 @@ app.clientside_callback(
           const status = resp.status;
           const ct = resp.headers.get("content-type") || "";
           const text = await resp.text();
-          const hint = `Tried **${url}** from the browser. Status **${status}**.  \n` +
+          const hint = `Tried **${url}** from the browser. Status **${status}**.  \\n` +
                        `(If blocked by CORS/third-party cookies, open the URL in a new tab while logged in.)`;
 
           if (resp.ok && ct.startsWith("application/json")) {
@@ -380,7 +382,7 @@ app.clientside_callback(
     Output("t1-me-hint", "children"),
     Input("user-refresh", "n_intervals"),
     Input("init-interval", "n_intervals"),
-    State(component_id=None, component_property=None, **{"id": "ME_URL", "property": "value", "value": ME_URL})  # pass ME_URL as a State literal
+    State("me-url", "data"),
 )
 
 # ───────────────────────── Tab 1: Load customers ─────────────────────────
