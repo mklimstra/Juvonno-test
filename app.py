@@ -1,4 +1,4 @@
-# app.py
+# good app.py
 import os, hashlib, base64, sqlite3, traceback
 from datetime import date
 from html import escape as html_escape
