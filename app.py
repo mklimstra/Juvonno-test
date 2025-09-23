@@ -1,5 +1,5 @@
 # app.py
-import os, hashlib, base64, sqlite3, traceback
+import os, hashlib, base64, sqlite3, traceback, json
 from datetime import date
 from html import escape as html_escape
 
@@ -110,7 +110,7 @@ def status_pill_component(text: str, kind: str = "success"):
         style = {
             "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
             "background": "#fdecea", "color": "#842029", "border": "1px solid #f5c2c7",
-            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
+            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
         }
     else:
         style = {
@@ -145,28 +145,20 @@ def _get_signed_in_name() -> str:
         token = auth.get_token()
         if not token:
             return ""
-        # Try Bearer
+        # Plain Bearer call only (no params), as requested
         try:
-            r = requests.get(f"{SITE_URL}/api/csiauth/me/",
-                             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                             timeout=5)
-            if r.status_code == 200:
+            r = requests.get(
+                f"{SITE_URL}/api/csiauth/me/",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                timeout=5,
+            )
+            if r.status_code == 200 and r.headers.get("Content-Type","").startswith("application/json"):
                 js = r.json()
                 first = (js.get("first_name") or "").strip()
                 last  = (js.get("last_name") or "").strip()
                 name = f"{first} {last}".strip() or js.get("email", "")
-                if name: return name
-        except Exception:
-            pass
-        # Try query param
-        try:
-            r2 = requests.get(f"{SITE_URL}/api/csiauth/me/", params={"access_token": token}, timeout=5)
-            if r2.status_code == 200:
-                js = r2.json()
-                first = (js.get("first_name") or "").strip()
-                last  = (js.get("last_name") or "").strip()
-                name = f"{first} {last}".strip() or js.get("email", "")
-                if name: return name
+                if name:
+                    return name
         except Exception:
             pass
         # JWT decode fallback
@@ -247,21 +239,25 @@ def tab1_layout():
             ])
         ], className="mb-4"),
 
-        # ── Minimal addition: show /api/csiauth/me/ JSON + which attempt worked
+        # ── Minimal addition: me() JSON viewer ─────────────────────────
         dbc.Card([
-            dbc.CardHeader("Current User JSON (/api/csiauth/me/)"),
+            dbc.CardHeader("Auth / me() Debug (Bearer only)"),
             dbc.CardBody([
                 dcc.Textarea(
-                    id="t1-auth-json-box",
+                    id="t1-me-json",
                     value="",
                     readOnly=True,
-                    style={"width":"100%","height":"180px","fontFamily":"ui-monospace, Menlo, Consolas, monospace",
-                           "fontSize":"12px"}
-                ),
-                html.Div(id="t1-auth-json-meta", className="text-muted mt-1", style={"fontSize":"12px"})
+                    style={
+                        "width": "100%",
+                        "height": "220px",
+                        "fontFamily": "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+                        "fontSize": "12px",
+                        "whiteSpace": "pre",
+                    },
+                )
             ])
         ], className="mb-4"),
-
+        # ────────────────────────────────────────────────────────────────
     ], fluid=True)
 
 # ───────────────────────── Tab 2 (Training Dashboard) ─────────────────────────
@@ -334,109 +330,37 @@ def refresh_user_badge(_n):
     except Exception:
         return html.A("Sign in", href="login", className="link-light")
 
-# ───────────────────────── Minimal new callback: fetch /api/csiauth/me/ JSON ─────────────────────────
+# ───────────────────────── me() JSON viewer callback (Bearer only) ─────────────────────────
 @app.callback(
-    Output("t1-auth-json-box", "value"),
-    Output("t1-auth-json-meta", "children"),
+    Output("t1-me-json", "value"),
     Input("user-refresh", "n_intervals"),
-    prevent_initial_call=False
+    Input("init-interval", "n_intervals"),
+    prevent_initial_call=False,
 )
-def refresh_auth_json(_n):
-    import json
-
-    def _pretty_or_json_text(resp):
-        """Return pretty JSON string if the response body contains JSON; else None."""
-        try:
-            ct = (resp.headers.get("Content-Type") or "").lower()
-            if "application/json" in ct:
-                return json.dumps(resp.json(), indent=2, ensure_ascii=False)
-            txt = (resp.text or "").strip()
-            if (txt.startswith("{") and txt.endswith("}")) or (txt.startswith("[") and txt.endswith("]")):
-                return json.dumps(json.loads(txt), indent=2, ensure_ascii=False)
-        except Exception:
-            pass
-        return None
-
-    def _attempt(name, url, headers=None, params=None):
-        try:
-            r = requests.get(
-                url,
-                headers=headers or {},
-                params=params or {},
-                timeout=6,
-                allow_redirects=False,  # avoid HTML login pages
-            )
-            return name, r
-        except Exception as e:
-            return name, e
-
+def show_me_json(_tick, _init):
+    """Call exactly https://apps.csipacific.ca/api/csiauth/me/ with Bearer token only."""
     try:
-        token = None
-        try:
-            token = auth.get_token()
-        except Exception:
-            token = None
-
+        token = auth.get_token()
         if not token:
-            return "Not signed in.", "worked=none (no token)"
-
-        base_url = f"{SITE_URL}/api/csiauth/me/"
-
-        attempts = [
-            ("Bearer", dict(url=base_url,
-                            headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
-                                     "X-Requested-With": "XMLHttpRequest"})),
-            ("Bearer+format=json", dict(url=base_url,
-                                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
-                                                 "X-Requested-With": "XMLHttpRequest"},
-                                        params={"format": "json"})),
-            ("access_token", dict(url=base_url,
-                                  headers={"Accept": "application/json", "X-Requested-With": "XMLHttpRequest"},
-                                  params={"access_token": token})),
-            ("access_token+format=json", dict(url=base_url,
-                                              headers={"Accept": "application/json", "X-Requested-With": "XMLHttpRequest"},
-                                              params={"access_token": token, "format": "json"})),
-        ]
-
-        diagnostics = []
-        for label, kwargs in attempts:
-            name, result = _attempt(label, **kwargs)
-            if isinstance(result, Exception):
-                diagnostics.append(f"{name}: error {type(result).__name__}: {result}")
-                continue
-            pretty = _pretty_or_json_text(result)
-            if pretty is not None:
-                return pretty, f"worked={name} (status={result.status_code})"
-            loc = result.headers.get("Location")
-            ct  = result.headers.get("Content-Type")
-            diagnostics.append(f"{name}: status={result.status_code}, content_type={ct or '-'}, location={loc or '-'}")
-
-        # Fallback: decode JWT payload so you still see something useful
-        try:
-            parts = token.split(".")
-            if len(parts) >= 2:
-                def _b64url_decode(s):
-                    s = s + "=" * (-len(s) % 4)
-                    return base64.urlsafe_b64decode(s.encode("utf-8"))
-                payload = json.loads(_b64url_decode(parts[1]).decode("utf-8"))
-                jwt_preview = json.dumps(payload, indent=2, ensure_ascii=False)
-            else:
-                jwt_preview = "(unavailable)"
-        except Exception:
-            jwt_preview = "(unavailable)"
-
-        diag = "\n".join(diagnostics) if diagnostics else "(no diagnostics)"
-        text = (
-            "Could not fetch JSON from /api/csiauth/me/.\n"
-            "API likely returned HTML or a redirect requiring a browser session.\n\n"
-            f"Attempts:\n{diag}\n\n"
-            "JWT payload preview (decoded from current token):\n"
-            f"{jwt_preview}"
-        )
-        return text, "worked=none"
-
+            return "No token available. Please sign in."
+        url = f"{SITE_URL}/api/csiauth/me/"
+        r = requests.get(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, timeout=8)
+        ct = r.headers.get("Content-Type", "")
+        if r.status_code == 200 and ct.startswith("application/json"):
+            try:
+                js = r.json()
+                pretty = json.dumps(js, indent=2, ensure_ascii=False)
+                return f"[SOURCE: Bearer only]\n{pretty}"
+            except Exception as e:
+                return f"[SOURCE: Bearer only]\nJSON parse error: {e}\n\nRaw body (truncated):\n{r.text[:2000]}"
+        else:
+            return (
+                "[SOURCE: Bearer only]\n"
+                f"Unexpected response.\nStatus: {r.status_code}\nContent-Type: {ct}\n\n"
+                f"Body (truncated):\n{r.text[:2000]}"
+            )
     except Exception as e:
-        return f"Error fetching /csiauth/me/: {e}", "worked=error"
+        return f"[SOURCE: Bearer only]\nRequest error: {e}"
 
 # ───────────────────────── Tab 1: Load customers ─────────────────────────
 @app.callback(
