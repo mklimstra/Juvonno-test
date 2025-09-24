@@ -39,18 +39,33 @@ except Exception:
 
 # ───────────────────────── Styles (tabs & pills) ─────────────────────────
 TABS_CONTAINER_STYLE = {
-    "display": "flex", "gap": "6px", "alignItems": "center",
-    "borderBottom": "0", "marginBottom": "4px", "width": "100%",
+    "display": "flex",
+    "gap": "6px",
+    "alignItems": "center",
+    "borderBottom": "0",
+    "marginBottom": "4px",
+    "width": "100%",
 }
 TAB_STYLE = {
-    "padding": "8px 14px", "border": "1px solid #e9ecef", "borderRadius": "8px",
-    "background": "#f8f9fb", "color": "#495057", "fontWeight": "500",
-    "flex": "1 1 0%", "textAlign": "center",
+    "padding": "8px 14px",
+    "border": "1px solid #e9ecef",
+    "borderRadius": "8px",
+    "background": "#f8f9fb",
+    "color": "#495057",
+    "fontWeight": "500",
+    "flex": "1 1 0%",
+    "textAlign": "center",
 }
 TAB_SELECTED_STYLE = {
-    "padding": "8px 14px", "border": "1px solid #cfe2ff", "borderRadius": "8px",
-    "background": "#e7f1ff", "color": "#084298", "fontWeight": "600",
-    "boxShadow": "inset 0 1px 0 rgba(255,255,255,.6)", "flex": "1 1 0%", "textAlign": "center",
+    "padding": "8px 14px",
+    "border": "1px solid #cfe2ff",
+    "borderRadius": "8px",
+    "background": "#e7f1ff",
+    "color": "#084298",
+    "fontWeight": "600",
+    "boxShadow": "inset 0 1px 0 rgba(255,255,255,.6)",
+    "flex": "1 1 0%",
+    "textAlign": "center",
 }
 
 # ───────────────────────── UI helpers (pills/dots/colors) ─────────────────────────
@@ -93,7 +108,7 @@ def status_pill_component(text: str, kind: str = "success"):
         style = {
             "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
             "background": "#fdecea", "color": "#842029", "border": "1px solid #f5c2c7",
-            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
+            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
         }
     else:
         style = {
@@ -157,65 +172,35 @@ def _get_signed_in_name() -> str:
     except Exception:
         return ""
 
-# ───────────────────────── DB helpers (add 'status' col if missing) ─────────────────────────
-def _db_connect():
-    return sqlite3.connect(td.DB_PATH, check_same_thread=False)
-
-def _ensure_status_column():
+# ───────────────────────── Speed helper: latest status fast scan ─────────────────────────
+def _latest_status_for_customer_fast(cid: int) -> str:
+    """
+    Scan this customer's appointments from latest to oldest and return
+    the first encounter's Training Status we find. Fewer API calls than
+    building a full forward-filled series.
+    """
     try:
-        conn = _db_connect(); cur = conn.cursor()
-        cur.execute("PRAGMA table_info(comments)")
-        cols = [r[1] for r in cur.fetchall()]
-        if "status" not in cols:
-            cur.execute("ALTER TABLE comments ADD COLUMN status TEXT")
-            conn.commit()
-    except Exception:
-        pass
-    finally:
-        try: conn.close()
-        except Exception: pass
-
-_ensure_status_column()
-
-# ───────────────────────── Faster + override-aware status ─────────────────────────
-def _latest_override_status(cid: int) -> str:
-    """Newest saved override in our DB for this athlete, if any."""
-    try:
-        conn = _db_connect(); cur = conn.cursor()
-        cur.execute("""
-            SELECT COALESCE(NULLIF(status,''), NULL), date, id
-            FROM comments
-            WHERE customer_id = ?
-            ORDER BY date DESC, id DESC
-            LIMIT 1
-        """, (int(cid),))
-        row = cur.fetchone()
-        return row[0] or "" if row else ""
+        appts = td.CID_TO_APPTS.get(cid, [])
+        if not appts:
+            return ""
+        # sort by date desc (string compare safe because they are 'YYYY-MM-DD' via tidy_date_str)
+        appts_sorted = sorted(
+            appts,
+            key=lambda a: td.tidy_date_str(a.get("date") or ""),
+            reverse=True
+        )
+        for ap in appts_sorted:
+            aid = ap.get("id")
+            eids = td.encounter_ids_for_appt(aid)
+            if not eids:
+                continue
+            max_eid = max(eids)
+            s = td.extract_training_status(td.fetch_encounter(max_eid))
+            if s:
+                return s
+        return ""
     except Exception:
         return ""
-    finally:
-        try: conn.close()
-        except Exception: pass
-
-def _fast_current_status_from_encounters(cid: int) -> str:
-    """Scan appointments newest→oldest; return first training status we find."""
-    appts = sorted(td.CID_TO_APPTS.get(cid, []),
-                   key=lambda ap: pd.to_datetime(td.tidy_date_str(ap.get("date")), errors="coerce"),
-                   reverse=True)
-    for ap in appts:
-        aid = ap.get("id")
-        eids = td.encounter_ids_for_appt(aid)
-        if not eids:  # no encounters
-            continue
-        max_eid = max(eids)
-        s = td.extract_training_status(td.fetch_encounter(max_eid))
-        if s:
-            return s
-    return ""
-
-def _effective_current_status_for_cid(cid: int) -> str:
-    """Prefer override if present, else fastest encounter-derived status."""
-    return _latest_override_status(cid) or _fast_current_status_from_encounters(cid)
 
 # ───────────────────────── Tab 1 (Overview) ─────────────────────────
 def tab1_layout():
@@ -255,13 +240,23 @@ def tab1_layout():
                         dcc.DatePickerSingle(id="t1-comment-date", display_format="YYYY-MM-DD", style={"width":"100%"}),
                         dcc.Dropdown(id="t1-complaint-dd", placeholder="Pick a complaint (optional)…",
                                      style={"width":"100%","marginTop":"6px"}),
-                        # NEW (minimal): status override picker
-                        dcc.Dropdown(
-                            id="t1-status-override-dd",
-                            options=[{"label": s, "value": s} for s in td.STATUS_ORDER],
-                            placeholder="Override status (optional)…",
-                            style={"width":"100%","marginTop":"6px"}
+
+                        # Toggle + hidden status override
+                        dbc.Button("Show status override", id="t1-override-toggle",
+                                   color="secondary", outline=True,
+                                   className="w-100", style={"marginTop":"6px"}),
+                        dbc.Collapse(
+                            dcc.Dropdown(
+                                id="t1-status-override",
+                                options=[{"label": s, "value": s} for s in td.STATUS_ORDER],
+                                placeholder="Override Training Status…",
+                                clearable=True,
+                                style={"width": "100%", "marginTop": "6px"}
+                            ),
+                            id="t1-override-collapse",
+                            is_open=False
                         ),
+
                         dbc.Button("Save Comment", id="t1-save-comment", color="success",
                                    className="w-100", style={"marginTop":"6px"}),
                     ], md=4),
@@ -279,12 +274,12 @@ def tab1_layout():
                         {"name":"Athlete","id":"Athlete", "editable": False},
                         {"name":"Complaint","id":"Complaint", "editable": False},
                         {"name":"Status","id":"Status", "editable": False},
-                        {"name":"Comment","id":"Comment", "editable": True},   # ONLY this is editable
+                        {"name":"Comment","id":"Comment", "editable": True},
                         {"name":"_id","id":"_id", "hidden": True, "editable": False},
                     ],
                     data=[],
                     row_deletable=True,
-                    editable=False,   # column-level 'editable' overrides; keep others locked
+                    editable=False,   # only "Comment" is editable via column config
                     page_action="none",
                     style_table={"overflowX":"auto","maxHeight":"240px","overflowY":"auto"},
                     style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","lineHeight":"22px"},
@@ -330,7 +325,7 @@ app.layout = html.Div([
             ],
             style=TABS_CONTAINER_STYLE,
             parent_style={"width": "100%"},
-            mobile_breakpoint=0,                # never stack vertically
+            mobile_breakpoint=0,
         ),
         html.Div(id="tabs-content", className="mt-3"),
     ], fluid=True),
@@ -368,7 +363,7 @@ def refresh_user_badge(_n):
     except Exception:
         return html.A("Sign in", href="login", className="link-light")
 
-# ───────────────────────── Tab 1: Load customers (faster status) ─────────────────────────
+# ───────────────────────── Tab 1: Load customers ─────────────────────────
 @app.callback(
     Output("t1-grid-container", "children"),
     Output("t1-rows-json", "data"),
@@ -398,8 +393,8 @@ def t1_load_customers(n_clicks, group_values):
                 pill_html(g.title(), color_for_label(g)) for g in sorted(cust_groups)
             ) if cust_groups else "—"
 
-            # FAST current training status: prefer override → latest encounter w/ status
-            current_status = _effective_current_status_for_cid(cid)
+            # Faster current training status: scan latest→earliest and stop at first found
+            current_status = _latest_status_for_customer_fast(cid)
 
             status_color = td.PASTEL_COLOR.get(current_status, "#e6e6e6")
             status_html = f"{dot_html(status_color)}{html_escape(current_status) if current_status else '—'}" if current_status else "—"
@@ -480,7 +475,7 @@ def t1_load_customers(n_clicks, group_values):
     Output("t1-comments-table", "data"),
     Output("t1-selected-athlete-label", "children"),
     Output("t1-comment-date", "date"),
-    Output("t1-status-override-dd", "value"),
+    Output("t1-status-override", "value"),
     Input("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
 )
@@ -507,7 +502,17 @@ def t1_on_select(selected_rows, rows_json):
 
     return opts, val, expanded, f" — {label}", today, None
 
-# ───────────────────────── Tab 1: Save comment (with status override) ─────────────────────────
+# ───────────────────────── Tab 1: Toggle override UI ─────────────────────────
+@app.callback(
+    Output("t1-override-collapse", "is_open"),
+    Input("t1-override-toggle", "n_clicks"),
+    State("t1-override-collapse", "is_open"),
+    prevent_initial_call=True
+)
+def toggle_override(n, is_open):
+    return not is_open
+
+# ───────────────────────── Tab 1: Save comment (with status carry/override) ─────────────────────────
 @app.callback(
     Output("t1-comments-table", "data", allow_duplicate=True),
     Output("t1-comment-text", "value", allow_duplicate=True),
@@ -515,14 +520,14 @@ def t1_on_select(selected_rows, rows_json):
     State("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
     State("t1-complaint-dd", "value"),
-    State("t1-status-override-dd", "value"),
     State("t1-comment-date", "date"),
     State("t1-comment-text", "value"),
+    State("t1-status-override", "value"),
     State("t1-comments-table", "data"),
     Input("t1-save-comment", "n_clicks"),
     prevent_initial_call=True,
 )
-def t1_save_comment(selected_rows, rows_json, complaint, status_override, date_str, text, table_data, _n):
+def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, override_status, table_data, _n):
     if not _n or not rows_json or not selected_rows or not date_str or not (text or "").strip():
         raise PreventUpdate
 
@@ -531,10 +536,12 @@ def t1_save_comment(selected_rows, rows_json, complaint, status_override, date_s
     label = row["_athlete_label"]
     author = _get_signed_in_name()
 
-    # Effective status: override if provided, else current status
-    effective_status = status_override or _effective_current_status_for_cid(cid)
+    # Determine status to store/display
+    status_to_use = (override_status or "").strip()
+    if not status_to_use:
+        status_to_use = _latest_status_for_customer_fast(cid) or ""
 
-    new_id = _db_add_comment_returning(cid, label, date_str, text.strip(), effective_status if status_override else "")
+    new_id = _db_add_comment_returning(cid, label, date_str, text.strip(), status_to_use or None)
 
     new_row = {
         "_id": new_id,
@@ -542,7 +549,7 @@ def t1_save_comment(selected_rows, rows_json, complaint, status_override, date_s
         "By": author or "",
         "Athlete": label,
         "Complaint": complaint or "",
-        "Status": effective_status or "",
+        "Status": status_to_use or "",
         "Comment": text.strip(),
     }
 
@@ -576,7 +583,7 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
             before = prev_by_id.get(cid)
             if not before:
                 continue
-            # Only Comment is editable; check and persist if changed
+            # Only Comment is editable; persist if changed
             if (before.get("Comment") or "") != (now.get("Comment") or ""):
                 _db_update_comment_text(cid, now.get("Comment") or "")
                 any_edit = True
@@ -593,11 +600,25 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
         return status_pill_component(f"Comment persistence error: {e}", "danger")
 
 # ───────────────────────── SQLite helpers (reuse td.DB_PATH) ─────────────────────────
-def _db_add_comment_returning(customer_id: int, customer_label: str, date_str: str, comment: str, status: str = "") -> int:
+def _db_connect():
+    conn = sqlite3.connect(td.DB_PATH, check_same_thread=False)
+    # Minimal migration: add override_status if missing
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(comments)")
+        cols = [row[1] for row in cur.fetchall()]
+        if "override_status" not in cols:
+            cur.execute("ALTER TABLE comments ADD COLUMN override_status TEXT")
+            conn.commit()
+    except Exception:
+        pass
+    return conn
+
+def _db_add_comment_returning(customer_id: int, customer_label: str, date_str: str, comment: str, override_status: str | None) -> int:
     conn = _db_connect(); cur = conn.cursor()
     cur.execute(
-        "INSERT INTO comments(customer_id, customer_label, date, comment, status, created_at) VALUES (?,?,?,?,?,datetime('now'))",
-        (int(customer_id), customer_label or "", date_str, comment, status or "")
+        "INSERT INTO comments(customer_id, customer_label, date, comment, override_status, created_at) VALUES (?,?,?,?,?,datetime('now'))",
+        (int(customer_id), customer_label or "", date_str, comment, override_status or None)
     )
     new_id = cur.lastrowid
     conn.commit(); conn.close()
@@ -609,26 +630,22 @@ def _db_list_comments_with_ids(customer_ids):
         vals = [int(x) for x in customer_ids]
         q = ",".join("?" for _ in vals)
         cur.execute(f"""
-          SELECT id, date, comment, COALESCE(NULLIF(status,''), ''), customer_label, customer_id, created_at
+          SELECT id, date, comment, customer_label, customer_id, created_at, override_status
           FROM comments
           WHERE customer_id IN ({q})
           ORDER BY date ASC, id ASC
         """, vals)
     else:
-        cur.execute("""
-            SELECT id, date, comment, COALESCE(NULLIF(status,''), ''), customer_label, customer_id, created_at
-            FROM comments
-            ORDER BY date ASC, id ASC
-        """)
+        cur.execute("SELECT id, date, comment, customer_label, customer_id, created_at, override_status FROM comments ORDER BY date ASC, id ASC")
     rows = cur.fetchall(); conn.close()
     return [{
         "_id": r[0],
         "Date": r[1],
         "Comment": r[2],
-        "Status": r[3] or "",
-        "Athlete": r[4],
-        "_cid": r[5],
-        "_created_at": r[6],
+        "Athlete": r[3],
+        "_cid": r[4],
+        "_created_at": r[5],
+        "_override_status": r[6] or "",
     } for r in rows]
 
 def _db_delete_comment(comment_id: int):
@@ -648,11 +665,13 @@ def _expand_comment_record(rec, athlete_label):
         "By": "",
         "Athlete": athlete_label,
         "Complaint": "",
-        "Status": rec.get("Status", "") or "",
+        "Status": rec.get("_override_status") or "",
         "Comment": rec["Comment"],
     }
 
 # ───────────────────────── Training tab callbacks ─────────────────────────
 td.register_callbacks(app)
 
-# ───────────────────────── Main ─────────────────────────
+# ───────────────────────── Main (optional for local dev) ─────────────────────────
+if __name__ == "__main__":
+    app.run(debug=False, port=8050)
