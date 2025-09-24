@@ -1,5 +1,5 @@
 # app.py
-import os, hashlib, base64, sqlite3, traceback, json
+import os, hashlib, base64, sqlite3, traceback
 from datetime import date
 from html import escape as html_escape
 
@@ -39,35 +39,18 @@ except Exception:
 
 # ───────────────────────── Styles (tabs & pills) ─────────────────────────
 TABS_CONTAINER_STYLE = {
-    "display": "flex",            # keep horizontal
-    "gap": "6px",
-    "alignItems": "center",
-    "borderBottom": "0",
-    "marginBottom": "4px",
-    "width": "100%",
+    "display": "flex", "gap": "6px", "alignItems": "center",
+    "borderBottom": "0", "marginBottom": "4px", "width": "100%",
 }
-
 TAB_STYLE = {
-    "padding": "8px 14px",
-    "border": "1px solid #e9ecef",
-    "borderRadius": "8px",
-    "background": "#f8f9fb",
-    "color": "#495057",
-    "fontWeight": "500",
-    "flex": "1 1 0%",             # stretch across the row
-    "textAlign": "center",
+    "padding": "8px 14px", "border": "1px solid #e9ecef", "borderRadius": "8px",
+    "background": "#f8f9fb", "color": "#495057", "fontWeight": "500",
+    "flex": "1 1 0%", "textAlign": "center",
 }
-
 TAB_SELECTED_STYLE = {
-    "padding": "8px 14px",
-    "border": "1px solid #cfe2ff",
-    "borderRadius": "8px",
-    "background": "#e7f1ff",
-    "color": "#084298",
-    "fontWeight": "600",
-    "boxShadow": "inset 0 1px 0 rgba(255,255,255,.6)",
-    "flex": "1 1 0%",
-    "textAlign": "center",
+    "padding": "8px 14px", "border": "1px solid #cfe2ff", "borderRadius": "8px",
+    "background": "#e7f1ff", "color": "#084298", "fontWeight": "600",
+    "boxShadow": "inset 0 1px 0 rgba(255,255,255,.6)", "flex": "1 1 0%", "textAlign": "center",
 }
 
 # ───────────────────────── UI helpers (pills/dots/colors) ─────────────────────────
@@ -103,8 +86,8 @@ def status_pill_component(text: str, kind: str = "success"):
     if kind == "success":
         style = {
             "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
-            "background": "#e9f7ef", "color": "#0f5132", "border": "1px solid #baddcc",
-            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
+            "background": "#e9f7ef", "color": "#0f5132", "border": "1px solid #badbcc",
+            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
         }
     elif kind == "danger":
         style = {
@@ -149,8 +132,8 @@ def _get_signed_in_name() -> str:
         try:
             r = requests.get(f"{SITE_URL}/api/csiauth/me/",
                              headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                             timeout=5, allow_redirects=False)
-            if r.status_code == 200 and r.headers.get("content-type","").startswith("application/json"):
+                             timeout=5)
+            if r.status_code == 200:
                 js = r.json()
                 first = (js.get("first_name") or "").strip()
                 last  = (js.get("last_name") or "").strip()
@@ -160,9 +143,8 @@ def _get_signed_in_name() -> str:
             pass
         # Try query param
         try:
-            r2 = requests.get(f"{SITE_URL}/api/csiauth/me/", params={"access_token": token},
-                              timeout=5, allow_redirects=False)
-            if r2.status_code == 200 and r2.headers.get("content-type","").startswith("application/json"):
+            r2 = requests.get(f"{SITE_URL}/api/csiauth/me/", params={"access_token": token}, timeout=5)
+            if r2.status_code == 200:
                 js = r2.json()
                 first = (js.get("first_name") or "").strip()
                 last  = (js.get("last_name") or "").strip()
@@ -175,66 +157,65 @@ def _get_signed_in_name() -> str:
     except Exception:
         return ""
 
-# ───────────────────────── Diagnostics helper (SERVER-SIDE) ─────────────────────────
-def _diagnose_me_endpoint() -> str:
-    """
-    Hit /api/csiauth/me/ four ways (no browser/CORS involved) and report
-    status, content-type, redirect location and JSON success.
-    """
-    url = f"{SITE_URL}/api/csiauth/me/"
-    lines = [f"Diagnostics for {url}", "-" * 64]
+# ───────────────────────── DB helpers (add 'status' col if missing) ─────────────────────────
+def _db_connect():
+    return sqlite3.connect(td.DB_PATH, check_same_thread=False)
+
+def _ensure_status_column():
     try:
-        token = auth.get_token()
+        conn = _db_connect(); cur = conn.cursor()
+        cur.execute("PRAGMA table_info(comments)")
+        cols = [r[1] for r in cur.fetchall()]
+        if "status" not in cols:
+            cur.execute("ALTER TABLE comments ADD COLUMN status TEXT")
+            conn.commit()
     except Exception:
-        token = None
+        pass
+    finally:
+        try: conn.close()
+        except Exception: pass
 
-    def attempt(label, method="GET", params=None, headers=None):
-        try:
-            r = requests.request(method, url, params=params or {}, headers=headers or {},
-                                 timeout=8, allow_redirects=False)
-            ctype = r.headers.get("content-type", "")
-            loc   = r.headers.get("location", "")
-            body_preview = r.text[:200].replace("\n"," ")
-            json_ok = False
-            parsed = None
-            if r.status_code == 200 and ctype.startswith("application/json"):
-                try:
-                    parsed = r.json()
-                    json_ok = True
-                except Exception:
-                    json_ok = False
-            lines.append(f"[{label}] status={r.status_code}, content_type={ctype or '∅'}, location={loc or '∅'}")
-            if json_ok:
-                pretty = json.dumps(parsed, indent=2)[:800]
-                lines.append(pretty)
-            else:
-                lines.append(f"(non-JSON or parse failed) body≈ {body_preview}")
-        except Exception as e:
-            lines.append(f"[{label}] EXCEPTION: {e}")
+_ensure_status_column()
 
-    # 1) Bearer only
-    if token:
-        attempt("Bearer", headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
-        # 2) Bearer + format=json (if supported)
-        attempt("Bearer+format=json",
-                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                params={"format": "json"})
-    else:
-        lines.append("[warning] No auth token available from DashAuthExternal.")
+# ───────────────────────── Faster + override-aware status ─────────────────────────
+def _latest_override_status(cid: int) -> str:
+    """Newest saved override in our DB for this athlete, if any."""
+    try:
+        conn = _db_connect(); cur = conn.cursor()
+        cur.execute("""
+            SELECT COALESCE(NULLIF(status,''), NULL), date, id
+            FROM comments
+            WHERE customer_id = ?
+            ORDER BY date DESC, id DESC
+            LIMIT 1
+        """, (int(cid),))
+        row = cur.fetchone()
+        return row[0] or "" if row else ""
+    except Exception:
+        return ""
+    finally:
+        try: conn.close()
+        except Exception: pass
 
-    # 3) access_token query only
-    if token:
-        attempt("access_token", params={"access_token": token})
-        attempt("access_token+format=json", params={"access_token": token, "format": "json"})
-    else:
-        attempt("anonymous (no token)")
+def _fast_current_status_from_encounters(cid: int) -> str:
+    """Scan appointments newest→oldest; return first training status we find."""
+    appts = sorted(td.CID_TO_APPTS.get(cid, []),
+                   key=lambda ap: pd.to_datetime(td.tidy_date_str(ap.get("date")), errors="coerce"),
+                   reverse=True)
+    for ap in appts:
+        aid = ap.get("id")
+        eids = td.encounter_ids_for_appt(aid)
+        if not eids:  # no encounters
+            continue
+        max_eid = max(eids)
+        s = td.extract_training_status(td.fetch_encounter(max_eid))
+        if s:
+            return s
+    return ""
 
-    # Summary hint
-    lines.append("-" * 64)
-    lines.append("Note: These are server-side requests (no CORS). If you see 302/HTML here,")
-    lines.append("the API is redirecting non-cookie requests. To make this return JSON to the app,")
-    lines.append("the API must either accept Authorization: Bearer or be same-origin with the Dash app.")
-    return "\n".join(lines)
+def _effective_current_status_for_cid(cid: int) -> str:
+    """Prefer override if present, else fastest encounter-derived status."""
+    return _latest_override_status(cid) or _fast_current_status_from_encounters(cid)
 
 # ───────────────────────── Tab 1 (Overview) ─────────────────────────
 def tab1_layout():
@@ -274,6 +255,13 @@ def tab1_layout():
                         dcc.DatePickerSingle(id="t1-comment-date", display_format="YYYY-MM-DD", style={"width":"100%"}),
                         dcc.Dropdown(id="t1-complaint-dd", placeholder="Pick a complaint (optional)…",
                                      style={"width":"100%","marginTop":"6px"}),
+                        # NEW (minimal): status override picker
+                        dcc.Dropdown(
+                            id="t1-status-override-dd",
+                            options=[{"label": s, "value": s} for s in td.STATUS_ORDER],
+                            placeholder="Override status (optional)…",
+                            style={"width":"100%","marginTop":"6px"}
+                        ),
                         dbc.Button("Save Comment", id="t1-save-comment", color="success",
                                    className="w-100", style={"marginTop":"6px"}),
                     ], md=4),
@@ -308,17 +296,6 @@ def tab1_layout():
                 ),
             ])
         ], className="mb-4"),
-
-        # ── Minimal diagnostics block (server-side) ──
-        html.Hr(),
-        html.Div([
-            html.Div("Debug: /api/csiauth/me/ (server-side)", className="fw-semibold mb-1"),
-            dbc.Button("Run /me diagnostics", id="t1-me-test", size="sm", color="secondary", className="mb-2"),
-            html.Pre(id="t1-me-output",
-                     style={"whiteSpace":"pre-wrap","fontSize":"12px","background":"#f8f9fa",
-                            "padding":"8px","border":"1px solid #eee", "minHeight":"40px"})
-        ], className="mb-4"),
-
     ], fluid=True)
 
 # ───────────────────────── Tab 2 (Training Dashboard) ─────────────────────────
@@ -351,7 +328,7 @@ app.layout = html.Div([
                 dcc.Tab(label="Status History", value="tab-2",
                         style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
             ],
-            style=TABS_CONTAINER_STYLE,         # horizontal tab bar
+            style=TABS_CONTAINER_STYLE,
             parent_style={"width": "100%"},
             mobile_breakpoint=0,                # never stack vertically
         ),
@@ -391,7 +368,7 @@ def refresh_user_badge(_n):
     except Exception:
         return html.A("Sign in", href="login", className="link-light")
 
-# ───────────────────────── Tab 1: Load customers ─────────────────────────
+# ───────────────────────── Tab 1: Load customers (faster status) ─────────────────────────
 @app.callback(
     Output("t1-grid-container", "children"),
     Output("t1-rows-json", "data"),
@@ -421,28 +398,8 @@ def t1_load_customers(n_clicks, group_values):
                 pill_html(g.title(), color_for_label(g)) for g in sorted(cust_groups)
             ) if cust_groups else "—"
 
-            # Current training status (ffill)
-            appts = td.CID_TO_APPTS.get(cid, [])
-            status_rows = []
-            for ap in appts:
-                aid = ap.get("id")
-                date_str = td.tidy_date_str(ap.get("date"))
-                dt = pd.to_datetime(date_str, errors="coerce")
-                if pd.isna(dt): continue
-                eids = td.encounter_ids_for_appt(aid)
-                max_eid = max(eids) if eids else None
-                s = td.extract_training_status(td.fetch_encounter(max_eid)) if max_eid else ""
-                if s: status_rows.append((dt.normalize(), s))
-
-            current_status = ""
-            if status_rows:
-                df_s = pd.DataFrame(status_rows, columns=["Date", "Status"]).sort_values("Date")
-                df_s = df_s.drop_duplicates("Date", keep="last")
-                full_idx = pd.date_range(start=df_s["Date"].min(),
-                                         end=pd.Timestamp("today").normalize(), freq="D")
-                df_full = pd.DataFrame({"Date": full_idx}).merge(df_s, on="Date", how="left").sort_values("Date")
-                df_full["Status"] = df_full["Status"].ffill()
-                current_status = str(df_full.iloc[-1]["Status"]) if not df_full.empty else ""
+            # FAST current training status: prefer override → latest encounter w/ status
+            current_status = _effective_current_status_for_cid(cid)
 
             status_color = td.PASTEL_COLOR.get(current_status, "#e6e6e6")
             status_html = f"{dot_html(status_color)}{html_escape(current_status) if current_status else '—'}" if current_status else "—"
@@ -523,6 +480,7 @@ def t1_load_customers(n_clicks, group_values):
     Output("t1-comments-table", "data"),
     Output("t1-selected-athlete-label", "children"),
     Output("t1-comment-date", "date"),
+    Output("t1-status-override-dd", "value"),
     Input("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
 )
@@ -533,7 +491,7 @@ def t1_on_select(selected_rows, rows_json):
     today = date.today().strftime("%Y-%m-%d")
 
     if not selected_rows:
-        return [], None, [], "", today
+        return [], None, [], "", today, None
 
     row = rows_json[selected_rows[0]]
     cid = int(row["_cid"])
@@ -547,9 +505,9 @@ def t1_on_select(selected_rows, rows_json):
     comments = _db_list_comments_with_ids([cid])
     expanded = [_expand_comment_record(rec, label) for rec in comments]
 
-    return opts, val, expanded, f" — {label}", today
+    return opts, val, expanded, f" — {label}", today, None
 
-# ───────────────────────── Tab 1: Save comment ─────────────────────────
+# ───────────────────────── Tab 1: Save comment (with status override) ─────────────────────────
 @app.callback(
     Output("t1-comments-table", "data", allow_duplicate=True),
     Output("t1-comment-text", "value", allow_duplicate=True),
@@ -557,13 +515,14 @@ def t1_on_select(selected_rows, rows_json):
     State("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
     State("t1-complaint-dd", "value"),
+    State("t1-status-override-dd", "value"),
     State("t1-comment-date", "date"),
     State("t1-comment-text", "value"),
     State("t1-comments-table", "data"),
     Input("t1-save-comment", "n_clicks"),
     prevent_initial_call=True,
 )
-def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, table_data, _n):
+def t1_save_comment(selected_rows, rows_json, complaint, status_override, date_str, text, table_data, _n):
     if not _n or not rows_json or not selected_rows or not date_str or not (text or "").strip():
         raise PreventUpdate
 
@@ -572,7 +531,10 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, table_d
     label = row["_athlete_label"]
     author = _get_signed_in_name()
 
-    new_id = _db_add_comment_returning(cid, label, date_str, text.strip())
+    # Effective status: override if provided, else current status
+    effective_status = status_override or _effective_current_status_for_cid(cid)
+
+    new_id = _db_add_comment_returning(cid, label, date_str, text.strip(), effective_status if status_override else "")
 
     new_row = {
         "_id": new_id,
@@ -580,7 +542,7 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, table_d
         "By": author or "",
         "Athlete": label,
         "Complaint": complaint or "",
-        "Status": "",
+        "Status": effective_status or "",
         "Comment": text.strip(),
     }
 
@@ -630,28 +592,12 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
     except Exception as e:
         return status_pill_component(f"Comment persistence error: {e}", "danger")
 
-# ───────────────────────── NEW: /me diagnostics callback ─────────────────────────
-@app.callback(
-    Output("t1-me-output", "children"),
-    Input("t1-me-test", "n_clicks"),
-    prevent_initial_call=True,
-)
-def run_me_diagnostics(_n):
-    try:
-        return _diagnose_me_endpoint()
-    except Exception as e:
-        tb = traceback.format_exc()
-        return f"Diagnostics error: {e}\n{tb}"
-
 # ───────────────────────── SQLite helpers (reuse td.DB_PATH) ─────────────────────────
-def _db_connect():
-    return sqlite3.connect(td.DB_PATH, check_same_thread=False)
-
-def _db_add_comment_returning(customer_id: int, customer_label: str, date_str: str, comment: str) -> int:
+def _db_add_comment_returning(customer_id: int, customer_label: str, date_str: str, comment: str, status: str = "") -> int:
     conn = _db_connect(); cur = conn.cursor()
     cur.execute(
-        "INSERT INTO comments(customer_id, customer_label, date, comment, created_at) VALUES (?,?,?,?,datetime('now'))",
-        (int(customer_id), customer_label or "", date_str, comment)
+        "INSERT INTO comments(customer_id, customer_label, date, comment, status, created_at) VALUES (?,?,?,?,?,datetime('now'))",
+        (int(customer_id), customer_label or "", date_str, comment, status or "")
     )
     new_id = cur.lastrowid
     conn.commit(); conn.close()
@@ -663,21 +609,26 @@ def _db_list_comments_with_ids(customer_ids):
         vals = [int(x) for x in customer_ids]
         q = ",".join("?" for _ in vals)
         cur.execute(f"""
-          SELECT id, date, comment, customer_label, customer_id, created_at
+          SELECT id, date, comment, COALESCE(NULLIF(status,''), ''), customer_label, customer_id, created_at
           FROM comments
           WHERE customer_id IN ({q})
           ORDER BY date ASC, id ASC
         """, vals)
     else:
-        cur.execute("SELECT id, date, comment, customer_label, customer_id, created_at FROM comments ORDER BY date ASC, id ASC")
+        cur.execute("""
+            SELECT id, date, comment, COALESCE(NULLIF(status,''), ''), customer_label, customer_id, created_at
+            FROM comments
+            ORDER BY date ASC, id ASC
+        """)
     rows = cur.fetchall(); conn.close()
     return [{
         "_id": r[0],
         "Date": r[1],
         "Comment": r[2],
-        "Athlete": r[3],
-        "_cid": r[4],
-        "_created_at": r[5],
+        "Status": r[3] or "",
+        "Athlete": r[4],
+        "_cid": r[5],
+        "_created_at": r[6],
     } for r in rows]
 
 def _db_delete_comment(comment_id: int):
@@ -697,7 +648,7 @@ def _expand_comment_record(rec, athlete_label):
         "By": "",
         "Athlete": athlete_label,
         "Complaint": "",
-        "Status": "",
+        "Status": rec.get("Status", "") or "",
         "Comment": rec["Comment"],
     }
 
@@ -705,5 +656,3 @@ def _expand_comment_record(rec, athlete_label):
 td.register_callbacks(app)
 
 # ───────────────────────── Main ─────────────────────────
-if __name__ == "__main__":
-    app.run(debug=False, port=8050)
