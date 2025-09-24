@@ -174,16 +174,10 @@ def _get_signed_in_name() -> str:
 
 # ───────────────────────── Speed helper: latest status fast scan ─────────────────────────
 def _latest_status_for_customer_fast(cid: int) -> str:
-    """
-    Scan this customer's appointments from latest to oldest and return
-    the first encounter's Training Status we find. Fewer API calls than
-    building a full forward-filled series.
-    """
     try:
         appts = td.CID_TO_APPTS.get(cid, [])
         if not appts:
             return ""
-        # sort by date desc (string compare safe because they are 'YYYY-MM-DD' via tidy_date_str)
         appts_sorted = sorted(
             appts,
             key=lambda a: td.tidy_date_str(a.get("date") or ""),
@@ -541,7 +535,16 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, overrid
     if not status_to_use:
         status_to_use = _latest_status_for_customer_fast(cid) or ""
 
-    new_id = _db_add_comment_returning(cid, label, date_str, text.strip(), status_to_use or None)
+    # ⬇️ Persist author & complaint as well
+    new_id = _db_add_comment_returning(
+        cid,
+        label,
+        date_str,
+        text.strip(),
+        status_to_use or None,
+        author or "",
+        complaint or ""
+    )
 
     new_row = {
         "_id": new_id,
@@ -602,23 +605,38 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
 # ───────────────────────── SQLite helpers (reuse td.DB_PATH) ─────────────────────────
 def _db_connect():
     conn = sqlite3.connect(td.DB_PATH, check_same_thread=False)
-    # Minimal migration: add override_status if missing
+    # Minimal migration: add override_status, author, complaint if missing
     try:
         cur = conn.cursor()
         cur.execute("PRAGMA table_info(comments)")
         cols = [row[1] for row in cur.fetchall()]
         if "override_status" not in cols:
             cur.execute("ALTER TABLE comments ADD COLUMN override_status TEXT")
-            conn.commit()
+        if "author" not in cols:
+            cur.execute("ALTER TABLE comments ADD COLUMN author TEXT")
+        if "complaint" not in cols:
+            cur.execute("ALTER TABLE comments ADD COLUMN complaint TEXT")
+        conn.commit()
     except Exception:
         pass
     return conn
 
-def _db_add_comment_returning(customer_id: int, customer_label: str, date_str: str, comment: str, override_status: str | None) -> int:
+def _db_add_comment_returning(
+    customer_id: int,
+    customer_label: str,
+    date_str: str,
+    comment: str,
+    override_status: str | None,
+    author: str,
+    complaint: str
+) -> int:
     conn = _db_connect(); cur = conn.cursor()
     cur.execute(
-        "INSERT INTO comments(customer_id, customer_label, date, comment, override_status, created_at) VALUES (?,?,?,?,?,datetime('now'))",
-        (int(customer_id), customer_label or "", date_str, comment, override_status or None)
+        """
+        INSERT INTO comments(customer_id, customer_label, date, comment, override_status, author, complaint, created_at)
+        VALUES (?,?,?,?,?,?,?,datetime('now'))
+        """,
+        (int(customer_id), customer_label or "", date_str, comment, override_status or None, author or "", complaint or "")
     )
     new_id = cur.lastrowid
     conn.commit(); conn.close()
@@ -630,13 +648,16 @@ def _db_list_comments_with_ids(customer_ids):
         vals = [int(x) for x in customer_ids]
         q = ",".join("?" for _ in vals)
         cur.execute(f"""
-          SELECT id, date, comment, customer_label, customer_id, created_at, override_status
+          SELECT id, date, comment, customer_label, customer_id, created_at, override_status, author, complaint
           FROM comments
           WHERE customer_id IN ({q})
           ORDER BY date ASC, id ASC
         """, vals)
     else:
-        cur.execute("SELECT id, date, comment, customer_label, customer_id, created_at, override_status FROM comments ORDER BY date ASC, id ASC")
+        cur.execute("""
+            SELECT id, date, comment, customer_label, customer_id, created_at, override_status, author, complaint
+            FROM comments ORDER BY date ASC, id ASC
+        """)
     rows = cur.fetchall(); conn.close()
     return [{
         "_id": r[0],
@@ -645,7 +666,9 @@ def _db_list_comments_with_ids(customer_ids):
         "Athlete": r[3],
         "_cid": r[4],
         "_created_at": r[5],
-        "_override_status": r[6] or "",
+        "_override_status": (r[6] or ""),
+        "_author": (r[7] or ""),
+        "_complaint": (r[8] or ""),
     } for r in rows]
 
 def _db_delete_comment(comment_id: int):
@@ -662,9 +685,9 @@ def _expand_comment_record(rec, athlete_label):
     return {
         "_id": rec["_id"],
         "Date": rec["Date"],
-        "By": "",
+        "By": rec.get("_author", "") or "",
         "Athlete": athlete_label,
-        "Complaint": "",
+        "Complaint": rec.get("_complaint", "") or "",
         "Status": rec.get("_override_status") or "",
         "Comment": rec["Comment"],
     }
