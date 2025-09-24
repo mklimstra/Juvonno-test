@@ -16,6 +16,10 @@ from layout import Footer, Navbar
 from settings import *  # AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLIENT_SECRET
 import training_dashboard as td  # reuse groups, API access, DB path, etc.
 
+# ───────────────────────── Constants ─────────────────────────
+# Base URL to send users for (re)authentication
+BASE_ROOT_URL = "https://0199594c-6df2-cf52-c051-91a6b8901094.share.connect.posit.cloud/"
+
 # ───────────────────────── Auth / Server ─────────────────────────
 auth = DashAuthExternal(
     AUTH_URL, TOKEN_URL,
@@ -102,13 +106,13 @@ def status_pill_component(text: str, kind: str = "success"):
         style = {
             "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
             "background": "#e9f7ef", "color": "#0f5132", "border": "1px solid #badbcc",
-            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
+            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
         }
     elif kind == "danger":
         style = {
             "display": "inline-block", "padding": "2px 8px", "borderRadius": PILL_BORDER_RADIUS,
             "background": "#fdecea", "color": "#842029", "border": "1px solid #f5c2c7",
-            "fontSize": "12px", "lineHeight": "18px", "whiteSpace": "nowrap"
+            "fontSize": "12px", "lineHeight": "18px", "WhiteSpace": "nowrap"
         }
     else:
         style = {
@@ -172,7 +176,7 @@ def _get_signed_in_name() -> str:
     except Exception:
         return ""
 
-# ───────────────────────── Status override (limited to 4 labels) ─────────────────────────
+# ───────────────────────── Status choices (same as previous step) ─────────────────────────
 STATUS_CHOICES = [
     "Full participation without Health problems",
     "Full participation with Illness/Injury",
@@ -180,17 +184,16 @@ STATUS_CHOICES = [
     "No Participation due to Illness/Injury",
 ]
 
-# ───────────────────────── Fast path: cache current status per athlete ─────────────────────────
+# ───────────────────────── Cache current status per athlete ─────────────────────────
 @functools.lru_cache(maxsize=2048)
 def _current_status_for_customer(cid: int) -> str:
-    """Compute forward-filled current training status for a customer id."""
     appts = td.CID_TO_APPTS.get(int(cid), [])
     status_rows = []
     for ap in appts:
         aid = ap.get("id")
         date_str = td.tidy_date_str(ap.get("date"))
         dt = pd.to_datetime(date_str, errors="coerce")
-        if pd.isna(dt): 
+        if pd.isna(dt):
             continue
         eids = td.encounter_ids_for_appt(aid)
         max_eid = max(eids) if eids else None
@@ -285,7 +288,7 @@ def tab1_layout():
                     ],
                     data=[],
                     row_deletable=True,
-                    editable=False,   # column-level editable keeps only Comment editable
+                    editable=False,   # only Comment remains editable via column spec
                     page_action="none",
                     style_table={"overflowX":"auto","maxHeight":"240px","overflowY":"auto"},
                     style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","lineHeight":"22px"},
@@ -357,17 +360,32 @@ def initial_view(n, pathname):
         token = None
     if token:
         return no_update
-    if (pathname or "").rstrip("/") == "/login":
-        return no_update
-    return "login"
+    # Always push user to base root to (re)authenticate
+    return BASE_ROOT_URL
 
 @app.callback(Output("navbar-user", "children"), Input("user-refresh", "n_intervals"))
 def refresh_user_badge(_n):
     try:
         name = _get_signed_in_name()
-        return f"Signed in as: {name}" if name else html.A("Sign in", href="login", className="link-light")
+        # Force the “Sign in” link to go to base root
+        return f"Signed in as: {name}" if name else html.A("Sign in", href=BASE_ROOT_URL, className="link-light")
     except Exception:
-        return html.A("Sign in", href="login", className="link-light")
+        return html.A("Sign in", href=BASE_ROOT_URL, className="link-light")
+
+# NEW: Heartbeat to enforce session; if token missing/expired, redirect to base root
+@app.callback(
+    Output("redirect-to", "href", allow_duplicate=True),
+    Input("user-refresh", "n_intervals"),
+    prevent_initial_call=True
+)
+def enforce_session(_n):
+    try:
+        token = auth.get_token()
+    except Exception:
+        token = None
+    if token:
+        return no_update
+    return BASE_ROOT_URL
 
 # ───────────────────────── Tab 1: Load customers ─────────────────────────
 @app.callback(
@@ -399,7 +417,7 @@ def t1_load_customers(n_clicks, group_values):
                 pill_html(g.title(), color_for_label(g)) for g in sorted(cust_groups)
             ) if cust_groups else "—"
 
-            # Current training status (now cached)
+            # Current training status (cached)
             current_status = _current_status_for_customer(int(cid))
             status_color = td.PASTEL_COLOR.get(current_status, "#e6e6e6")
             status_html = f"{dot_html(status_color)}{html_escape(current_status) if current_status else '—'}" if current_status else "—"
@@ -459,7 +477,7 @@ def t1_load_customers(n_clicks, group_values):
             style_data={"borderBottom":"1px solid #eceff4"},
             style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
             row_selectable="single",
-            selected_rows=[0],  # preselect first row so comment UI populates immediately
+            selected_rows=[0],
         )
 
         return table, rows, "", False
@@ -473,15 +491,18 @@ def t1_load_customers(n_clicks, group_values):
         ])
         return no_update, no_update, msg, True
 
-# ───────────────────────── Tab 1: Toggle status override visibility ─────────────────────────
+# ───────────────────────── Tab 1: Toggle status override (and clear when off) ─────────────────────────
 @app.callback(
     Output("t1-status-collapse", "is_open"),
+    Output("t1-status-override", "value"),
     Input("t1-toggle-status", "n_clicks"),
     State("t1-status-collapse", "is_open"),
     prevent_initial_call=True
 )
 def toggle_status_override(n, is_open):
-    return not is_open
+    new_state = not bool(is_open)
+    # If toggled OFF, clear the dropdown value; if toggled ON, keep whatever user had (no_update)
+    return new_state, (None if not new_state else no_update)
 
 # ───────────────────────── Tab 1: On select athlete ─────────────────────────
 @app.callback(
@@ -515,6 +536,7 @@ def t1_on_select(selected_rows, rows_json):
     comments = _db_list_comments_with_ids([cid])
     expanded = [_expand_comment_record(rec, label, cid) for rec in comments]
 
+    # Clear any lingering override when switching athletes
     return opts, val, expanded, f" — {label}", today, None
 
 # ───────────────────────── Tab 1: Save comment ─────────────────────────
@@ -522,6 +544,7 @@ def t1_on_select(selected_rows, rows_json):
     Output("t1-comments-table", "data", allow_duplicate=True),
     Output("t1-comment-text", "value", allow_duplicate=True),
     Output("t1-comment-status", "children", allow_duplicate=True),
+    Output("t1-status-override", "value", allow_duplicate=True),  # clear after save
     State("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
     State("t1-complaint-dd", "value"),
@@ -564,7 +587,8 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, status_
     current = table_data or []
     updated = current + [new_row]
 
-    return updated, "", status_pill_component("Comment saved.", "success")
+    # Clear textarea and override dropdown after save
+    return updated, "", status_pill_component("Comment saved.", "success"), None
 
 # ───────────────────────── Tab 1: Persist edits/deletes ─────────────────────────
 @app.callback(
@@ -626,18 +650,17 @@ def _db_connect():
             cur.execute(f"ALTER TABLE comments ADD COLUMN {name} {sqltype}")
         conn.commit()
     except Exception:
-        # Best effort; ignore if ALTER not supported in some path
         pass
     return conn
 
 def _db_add_comment_returning(customer_id: int, customer_label: str, date_str: str, comment: str,
                               complaint: str = "", author: str = "", status_override: str = "") -> int:
     conn = _db_connect(); cur = conn.cursor()
-    # Insert with new optional columns (NULL if not added)
     cur.execute(
         """INSERT INTO comments(customer_id, customer_label, date, comment, complaint, author, status_override, created_at)
            VALUES (?,?,?,?,?,?,?,datetime('now'))""",
-        (int(customer_id), customer_label or "", date_str, comment, complaint or None, author or None, status_override or None)
+        (int(customer_id), customer_label or "", date_str, comment,
+         complaint or None, author or None, status_override or None)
     )
     new_id = cur.lastrowid
     conn.commit(); conn.close()
@@ -645,7 +668,6 @@ def _db_add_comment_returning(customer_id: int, customer_label: str, date_str: s
 
 def _db_list_comments_with_ids(customer_ids):
     conn = _db_connect(); cur = conn.cursor()
-    # Decide at runtime which columns exist
     cur.execute("PRAGMA table_info(comments)")
     cols = [row[1] for row in cur.fetchall()]
     has_author = "author" in cols
@@ -687,7 +709,6 @@ def _db_list_comments_with_ids(customer_ids):
         complaint = r[idx] if has_complaint else ""
         idx += 1 if has_complaint else 0
         status_override = r[idx] if has_status_override else ""
-        # stash extended fields
         base["_author"] = author or ""
         base["_complaint"] = complaint or ""
         base["_status_override"] = status_override or ""
@@ -705,7 +726,6 @@ def _db_update_comment_text(comment_id: int, new_text: str):
     conn.commit(); conn.close()
 
 def _expand_comment_record(rec, athlete_label, cid: int):
-    # Choose status to display for existing row: use saved override if present, else current status
     status = rec.get("_status_override") or _current_status_for_customer(int(cid))
     return {
         "_id": rec["_id"],
