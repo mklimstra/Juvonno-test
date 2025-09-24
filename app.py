@@ -17,7 +17,6 @@ from settings import *  # AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLI
 import training_dashboard as td  # reuse groups, API access, DB path, etc.
 
 # ───────────────────────── Constants ─────────────────────────
-# Base URL to send users for (re)authentication
 BASE_ROOT_URL = "https://0199594c-6df2-cf52-c051-91a6b8901094.share.connect.posit.cloud/"
 
 # ───────────────────────── Auth / Server ─────────────────────────
@@ -74,7 +73,7 @@ TAB_SELECTED_STYLE = {
 
 # ───────────────────────── UI helpers (pills/dots/colors) ─────────────────────────
 PILL_BG_DEFAULT = "#eef2f7"
-PILL_BORDER_RADIUS = "6px"  # less rounded corners
+PILL_BORDER_RADIUS = "6px"
 PALETTE = ["#e7f0ff", "#fde2cf", "#e6f3e6", "#f3e6f7", "#fff3cd", "#e0f7fa", "#fbe7eb", "#e7f5ff"]
 BORDER = "#cfd6de"
 
@@ -176,7 +175,7 @@ def _get_signed_in_name() -> str:
     except Exception:
         return ""
 
-# ───────────────────────── Status choices (same as previous step) ─────────────────────────
+# ───────────────────────── Status choices ─────────────────────────
 STATUS_CHOICES = [
     "Full participation without Health problems",
     "Full participation with Illness/Injury",
@@ -288,7 +287,7 @@ def tab1_layout():
                     ],
                     data=[],
                     row_deletable=True,
-                    editable=False,   # only Comment remains editable via column spec
+                    editable=False,
                     page_action="none",
                     style_table={"overflowX":"auto","maxHeight":"240px","overflowY":"auto"},
                     style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","lineHeight":"22px"},
@@ -360,19 +359,16 @@ def initial_view(n, pathname):
         token = None
     if token:
         return no_update
-    # Always push user to base root to (re)authenticate
     return BASE_ROOT_URL
 
 @app.callback(Output("navbar-user", "children"), Input("user-refresh", "n_intervals"))
 def refresh_user_badge(_n):
     try:
         name = _get_signed_in_name()
-        # Force the “Sign in” link to go to base root
         return f"Signed in as: {name}" if name else html.A("Sign in", href=BASE_ROOT_URL, className="link-light")
     except Exception:
         return html.A("Sign in", href=BASE_ROOT_URL, className="link-light")
 
-# NEW: Heartbeat to enforce session; if token missing/expired, redirect to base root
 @app.callback(
     Output("redirect-to", "href", allow_duplicate=True),
     Input("user-refresh", "n_intervals"),
@@ -417,12 +413,10 @@ def t1_load_customers(n_clicks, group_values):
                 pill_html(g.title(), color_for_label(g)) for g in sorted(cust_groups)
             ) if cust_groups else "—"
 
-            # Current training status (cached)
             current_status = _current_status_for_customer(int(cid))
             status_color = td.PASTEL_COLOR.get(current_status, "#e6e6e6")
             status_html = f"{dot_html(status_color)}{html_escape(current_status) if current_status else '—'}" if current_status else "—"
 
-            # Complaints (cached in td)
             complaints = td.fetch_customer_complaints(cid)
             complaint_names = [c["Title"] for c in complaints if c.get("Title")]
             complaints_html = " ".join(
@@ -501,7 +495,6 @@ def t1_load_customers(n_clicks, group_values):
 )
 def toggle_status_override(n, is_open):
     new_state = not bool(is_open)
-    # If toggled OFF, clear the dropdown value; if toggled ON, keep whatever user had (no_update)
     return new_state, (None if not new_state else no_update)
 
 # ───────────────────────── Tab 1: On select athlete ─────────────────────────
@@ -511,7 +504,7 @@ def toggle_status_override(n, is_open):
     Output("t1-comments-table", "data"),
     Output("t1-selected-athlete-label", "children"),
     Output("t1-comment-date", "date"),
-    Output("t1-status-override", "value"),
+    Output("t1-status-override", "value", allow_duplicate=True),  # ← minimal fix here
     Input("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
 )
@@ -536,7 +529,6 @@ def t1_on_select(selected_rows, rows_json):
     comments = _db_list_comments_with_ids([cid])
     expanded = [_expand_comment_record(rec, label, cid) for rec in comments]
 
-    # Clear any lingering override when switching athletes
     return opts, val, expanded, f" — {label}", today, None
 
 # ───────────────────────── Tab 1: Save comment ─────────────────────────
@@ -544,7 +536,7 @@ def t1_on_select(selected_rows, rows_json):
     Output("t1-comments-table", "data", allow_duplicate=True),
     Output("t1-comment-text", "value", allow_duplicate=True),
     Output("t1-comment-status", "children", allow_duplicate=True),
-    Output("t1-status-override", "value", allow_duplicate=True),  # clear after save
+    Output("t1-status-override", "value", allow_duplicate=True),
     State("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
     State("t1-complaint-dd", "value"),
@@ -564,7 +556,6 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, status_
     label = row["_athlete_label"]
     author = _get_signed_in_name()
 
-    # Choose status to save/display
     status_to_use = status_override or _current_status_for_customer(cid)
 
     new_id = _db_add_comment_returning(
@@ -587,7 +578,6 @@ def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, status_
     current = table_data or []
     updated = current + [new_row]
 
-    # Clear textarea and override dropdown after save
     return updated, "", status_pill_component("Comment saved.", "success"), None
 
 # ───────────────────────── Tab 1: Persist edits/deletes ─────────────────────────
@@ -615,7 +605,6 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
             before = prev_by_id.get(cid)
             if not before:
                 continue
-            # Only Comment is editable; check and persist if changed
             if (before.get("Comment") or "") != (now.get("Comment") or ""):
                 _db_update_comment_text(cid, now.get("Comment") or "")
                 any_edit = True
@@ -634,7 +623,6 @@ def t1_persist_comment_mutations(_ts, data, data_prev):
 # ───────────────────────── SQLite helpers (reuse td.DB_PATH) ─────────────────────────
 def _db_connect():
     conn = sqlite3.connect(td.DB_PATH, check_same_thread=False)
-    # Light migration: add new columns if they don't exist
     try:
         cur = conn.cursor()
         cur.execute("PRAGMA table_info(comments)")
