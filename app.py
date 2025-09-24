@@ -504,9 +504,10 @@ def toggle_status_override(n, is_open):
     Output("t1-comments-table", "data"),
     Output("t1-selected-athlete-label", "children"),
     Output("t1-comment-date", "date"),
-    Output("t1-status-override", "value", allow_duplicate=True),  # ← minimal fix here
+    Output("t1-status-override", "value", allow_duplicate=True),
     Input("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
+    prevent_initial_call="initial_duplicate",   # ← add this line
 )
 def t1_on_select(selected_rows, rows_json):
     if not rows_json:
