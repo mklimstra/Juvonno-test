@@ -1,5 +1,5 @@
 # app.py
-import os, hashlib, base64, sqlite3, traceback, functools, time  # ← time added
+import os, hashlib, base64, sqlite3, traceback, functools
 from datetime import date
 from html import escape as html_escape
 
@@ -222,10 +222,7 @@ def tab1_layout():
                 placeholder="Select athlete group(s)…"
             ), md=6),
             dbc.Col(dbc.Button("Load", id="t1-load", color="primary", className="w-100"), md=2),
-        ], className="g-2 mb-1"),
-
-        # Timing diagnostics line (added)
-        html.Div(id="t1-timings", className="small text-muted mb-2"),
+        ], className="g-2 mb-2"),
 
         dbc.Alert(id="t1-msg", is_open=False, color="danger"),
 
@@ -386,43 +383,28 @@ def enforce_session(_n):
         return no_update
     return BASE_ROOT_URL
 
-# ───────────────────────── Tab 1: Load customers (with timings) ─────────────────────────
+# ───────────────────────── Tab 1: Load customers ─────────────────────────
 @app.callback(
     Output("t1-grid-container", "children"),
     Output("t1-rows-json", "data"),
     Output("t1-msg", "children"),
     Output("t1-msg", "is_open"),
-    Output("t1-timings", "children"),  # ← new diagnostics line
     Input("t1-load", "n_clicks"),
     State("t1-group-dd", "value"),
     prevent_initial_call=True
 )
 def t1_load_customers(n_clicks, group_values):
-    t_all0 = time.perf_counter()
     try:
         if not group_values:
-            return no_update, no_update, "Select at least one group.", True, ""
+            return no_update, no_update, "Select at least one group.", True
 
-        t_setup0 = time.perf_counter()
         targets = {td._norm(g) for g in group_values}
         rows = []
 
-        # Counters/timers
-        total_customers = len(td.CUSTOMERS)
-        considered = 0
-        matched = 0
-        status_calls = 0
-        comp_calls = 0
-        t_status_total = 0.0
-        t_comp_total = 0.0
-
-        # Iterate customers
         for cid, cust in td.CUSTOMERS.items():
-            considered += 1
             cust_groups = set(td.CID_TO_GROUPS.get(cid, []))
             if not (targets & cust_groups):
                 continue
-            matched += 1
 
             first = (cust.get("first_name") or "").strip()
             last  = (cust.get("last_name") or "").strip()
@@ -431,21 +413,11 @@ def t1_load_customers(n_clicks, group_values):
                 pill_html(g.title(), color_for_label(g)) for g in sorted(cust_groups)
             ) if cust_groups else "—"
 
-            # Status (timed)
-            t0 = time.perf_counter()
             current_status = _current_status_for_customer(int(cid))
-            t_status_total += (time.perf_counter() - t0)
-            status_calls += 1
-
             status_color = td.PASTEL_COLOR.get(current_status, "#e6e6e6")
             status_html = f"{dot_html(status_color)}{html_escape(current_status) if current_status else '—'}" if current_status else "—"
 
-            # Complaints (timed)
-            t0 = time.perf_counter()
             complaints = td.fetch_customer_complaints(cid)
-            t_comp_total += (time.perf_counter() - t0)
-            comp_calls += 1
-
             complaint_names = [c["Title"] for c in complaints if c.get("Title")]
             complaints_html = " ".join(
                 pill_html(t, color_for_label(t), border=BORDER) for t in complaint_names
@@ -464,17 +436,8 @@ def t1_load_customers(n_clicks, group_values):
             })
 
         if not rows:
-            timings = _format_timings(
-                total_customers, considered, matched,
-                t_setup=time.perf_counter() - t_setup0,
-                t_status=t_status_total, status_calls=status_calls,
-                t_comp=t_comp_total, comp_calls=comp_calls,
-                t_table=0.0, t_total=time.perf_counter() - t_all0
-            )
-            return html.Div("No athletes in those groups."), [], "", False, timings
+            return html.Div("No athletes in those groups."), [], "", False
 
-        # Build table (timed)
-        t_table0 = time.perf_counter()
         columns = [
             {"name":"First Name", "id":"First Name"},
             {"name":"Last Name",  "id":"Last Name"},
@@ -510,17 +473,8 @@ def t1_load_customers(n_clicks, group_values):
             row_selectable="single",
             selected_rows=[0],
         )
-        t_table = time.perf_counter() - t_table0
 
-        timings = _format_timings(
-            total_customers, considered, matched,
-            t_setup=time.perf_counter() - t_setup0,
-            t_status=t_status_total, status_calls=status_calls,
-            t_comp=t_comp_total, comp_calls=comp_calls,
-            t_table=t_table, t_total=time.perf_counter() - t_all0
-        )
-
-        return table, rows, "", False, timings
+        return table, rows, "", False
 
     except Exception as e:
         tb = traceback.format_exc()
@@ -529,24 +483,7 @@ def t1_load_customers(n_clicks, group_values):
             html.Pre(str(e)),
             html.Details([html.Summary("Traceback"), html.Pre(tb)], open=False)
         ])
-        # still show whatever timing we have
-        timings = f"Load failed after {time.perf_counter() - t_all0:.2f}s"
-        return no_update, no_update, msg, True, timings
-
-def _format_timings(total_customers, considered, matched,
-                    t_setup, t_status, status_calls, t_comp, comp_calls, t_table, t_total):
-    def fmt(s): return f"{s:.2f}s"
-    avg_status = (t_status / status_calls) if status_calls else 0.0
-    avg_comp   = (t_comp / comp_calls) if comp_calls else 0.0
-    return html.Pre(
-        f"Juvonno load timings — total {fmt(t_total)}\n"
-        f"  customers: total={total_customers}, considered={considered}, matched={matched}\n"
-        f"  setup/filter: {fmt(t_setup)}\n"
-        f"  status lookups: {fmt(t_status)} over {status_calls} (avg {avg_status:.3f}s)\n"
-        f"  complaints fetch: {fmt(t_comp)} over {comp_calls} (avg {avg_comp:.3f}s)\n"
-        f"  table build: {fmt(t_table)}",
-        style={"whiteSpace": "pre-wrap", "margin": "0"}
-    )
+        return no_update, no_update, msg, True
 
 # ───────────────────────── Tab 1: Toggle status override (and clear when off) ─────────────────────────
 @app.callback(
@@ -570,7 +507,7 @@ def toggle_status_override(n, is_open):
     Output("t1-status-override", "value", allow_duplicate=True),
     Input("t1-athlete-table", "selected_rows"),
     State("t1-rows-json", "data"),
-    prevent_initial_call="initial_duplicate",
+    prevent_initial_call="initial_duplicate",   # ← add this line
 )
 def t1_on_select(selected_rows, rows_json):
     if not rows_json:
