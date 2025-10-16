@@ -1,3 +1,4 @@
 from .footer import Footer
 from .navbar import Navbar
-from .profile import ProfileCard
+from .pagination import Pagination
+from .geography import GeographyFilters

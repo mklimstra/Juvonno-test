@@ -1,27 +1,15 @@
 from dash import html
-import dash
-from dash.dependencies import Input, Output, State
 import dash_bootstrap_components as dbc
 
-class Navbar:
-    def __init__(self, buttons=None, id="navbar", title="CSIP Apps", expand="lg"):
-        self.buttons = buttons or []
-        self.id = id
-        self.title = title
-        self.expand = expand
-        # unique IDs for toggler/collapse
-        self.toggler_id = f"{self.id}-toggler"
-        self.collapse_id = f"{self.id}-collapse"
+class Navbar():
 
-    def _nav_items(self):
-        return [
-            dbc.NavItem(
-                dbc.NavLink(item["label"], href=item["url"],
-                            active="exact",
-                            className="px-3 py-2")
-            )
-            for item in self.buttons
-        ]
+    def __init__(self, buttons=[], id="navbar"):
+        self.buttons = buttons
+        self.navlinks = []
+        self.id= id
+
+    def nav_item(self, label, url):
+        return dbc.NavItem(dbc.NavLink(label, href=url))
 
     def render(self):
         return dbc.Navbar(
@@ -31,25 +19,30 @@ class Navbar:
                     dbc.NavbarBrand(
                         [
                             html.Img(src="assets/img/csi-pacific-logo-reverse.png", height="40px"),
-                            html.Span(self.title, className="ms-2 h5 mb-0"),
+                            html.Span("Athlete Training Status", className="ms-2 h5 mb-0")
                         ],
-                        href="/home",
-                        className="d-flex align-items-center text-white text-decoration-none",
+                        href="#",
+                        className="d-flex align-items-center text-white text-decoration-none"
                     ),
 
-                    # Hamburger toggler (shown below `expand`)
-                    dbc.NavbarToggler(id=self.toggler_id, n_clicks=0, className="ms-auto"),
+                    # Nav links
+                    # dbc.Nav(
+                    #     self.navlinks,
+                    #     className="col-12 col-lg-auto me-lg-auto mb-2 justify-content-center mb-md-0",
+                    #     navbar=True,
+                    # ),
 
-                    # Collapsible nav area
-                    dbc.Collapse(
-                        dbc.Nav(
-                            self._nav_items(),
-                            navbar=True,
-                            className="flex-column flex-lg-row ms-lg-auto align-items-start align-items-lg-center gap-2",
-                        ),
-                        id=self.collapse_id,
-                        navbar=True,
-                        is_open=False,
+                    # Search form
+                    # dbc.Form(
+                    #     dbc.Input(type="search", placeholder="Search...", className="form-control-dark text-bg-dark"),
+                    #     className="col-12 col-lg-auto mb-3 mb-lg-0 me-lg-3",
+                    #     navbar=True,
+                    # ),
+
+                    # Buttons
+                    html.Div(
+                        self.buttons,
+                        className="text-end",
                     ),
                 ]
             ),
@@ -57,17 +50,4 @@ class Navbar:
             dark=True,
             className="p-3",
             id=self.id,
-            expand=self.expand,   # collapse below 'lg' (change to 'md' if you want earlier)
         )
-
-    def register_callbacks(self, app: dash.Dash):
-        @app.callback(
-            Output(self.collapse_id, "is_open"),
-            Input(self.toggler_id, "n_clicks"),
-            State(self.collapse_id, "is_open"),
-            prevent_initial_call=True,
-        )
-        def _toggle_collapse(n, is_open):
-            if n:
-                return not is_open
-            return is_open
