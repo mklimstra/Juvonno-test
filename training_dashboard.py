@@ -202,10 +202,30 @@ def _group_names_from_customer(cust: Dict) -> List[str]:
                     )
                     if raw:
                         names.append(_norm(raw))
+                    nested_group = it.get("group")
+                    if isinstance(nested_group, dict):
+                        raw_nested = _first_non_empty(
+                            nested_group.get("name"),
+                            nested_group.get("label"),
+                            nested_group.get("title"),
+                            nested_group.get("group_name"),
+                        )
+                        if raw_nested:
+                            names.append(_norm(raw_nested))
         elif isinstance(src, dict):
             raw = _first_non_empty(src.get("name"), src.get("label"), src.get("title"), src.get("group_name"))
             if raw:
                 names.append(_norm(raw))
+            nested_group = src.get("group")
+            if isinstance(nested_group, dict):
+                raw_nested = _first_non_empty(
+                    nested_group.get("name"),
+                    nested_group.get("label"),
+                    nested_group.get("title"),
+                    nested_group.get("group_name"),
+                )
+                if raw_nested:
+                    names.append(_norm(raw_nested))
         elif isinstance(src, str):
             for token in re.split(r"[,;|]", src):
                 token_n = _norm(token)
@@ -281,8 +301,8 @@ def enrich_customers(customers: Dict[int, Dict]) -> Dict[int, Dict]:
         if needs_detail:
             detail = _customer_detail_safe(int(cid))
             if isinstance(detail, dict) and detail:
-                merged = dict(detail)
-                merged.update(base)
+                merged = dict(base)
+                merged.update(detail)
                 base = merged
         out[int(cid)] = base
     return out
