@@ -744,9 +744,13 @@ print(f"API_KEY set: {bool(API_KEY)}")
 
 try:
     print(f"\nStep 1: Load Customers")
-    CUSTOMERS = enrich_customers(fetch_customers_full())
-    print(f"  Loaded: {len(CUSTOMERS)} customers")
-    print(f"  Enrichment complete, proceeding to next step...")
+    if CUSTOMERS:
+        print(f"  Reusing {len(CUSTOMERS)} customers from module init")
+        print(f"  Enrichment complete, proceeding to next step...")
+    else:
+        CUSTOMERS = enrich_customers(fetch_customers_full())
+        print(f"  Loaded: {len(CUSTOMERS)} customers")
+        print(f"  Enrichment complete, proceeding to next step...")
     
     print(f"\nStep 2: Load Branches/Clinics Directly")
     DIRECT_BRANCHES = fetch_branches_and_clinics_direct()
