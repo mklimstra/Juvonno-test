@@ -114,6 +114,39 @@ def _branch_id_from_obj(obj: Dict) -> Optional[int]:
             continue
     return None
 
+def _branch_name_from_obj(obj: Dict) -> str:
+    if not isinstance(obj, dict):
+        return ""
+
+    candidates: List[str] = []
+    for key in ("name", "branch_name", "clinic_name", "location_name", "site_name", "title", "label", "code"):
+        val = obj.get(key)
+        if isinstance(val, str) and val.strip():
+            candidates.append(val.strip())
+
+    branch_obj = obj.get("branch")
+    if isinstance(branch_obj, dict):
+        for key in ("name", "branch_name", "title", "label", "code"):
+            val = branch_obj.get(key)
+            if isinstance(val, str) and val.strip():
+                candidates.append(val.strip())
+
+    clinic_obj = obj.get("clinic")
+    if isinstance(clinic_obj, dict):
+        for key in ("name", "clinic_name", "title", "label", "code"):
+            val = clinic_obj.get(key)
+            if isinstance(val, str) and val.strip():
+                candidates.append(val.strip())
+
+    location_obj = obj.get("location")
+    if isinstance(location_obj, dict):
+        for key in ("name", "location_name", "title", "label", "code"):
+            val = location_obj.get(key)
+            if isinstance(val, str) and val.strip():
+                candidates.append(val.strip())
+
+    return candidates[0] if candidates else ""
+
 def _group_names_from_customer(cust: Dict) -> List[str]:
     names: List[str] = []
     for src_key in ("groups", "group", "customer_groups", "patient_groups", "tags"):
@@ -312,6 +345,43 @@ def fetch_available_branches(customers: Dict[int, Dict]) -> List[int]:
 
     return sorted(branch_ids)
 
+def fetch_branch_name_map(customers: Dict[int, Dict]) -> Dict[int, str]:
+    names: Dict[int, str] = {}
+
+    for customer in customers.values():
+        bid = _branch_id_from_obj(customer)
+        bname = _branch_name_from_obj(customer)
+        if bid is not None and bname:
+            names[bid] = bname
+
+    for endpoint in ("branches/list", "branches"):
+        page = 1
+        while True:
+            try:
+                js = _get(endpoint, page=page, count=100, limit=100)
+            except requests.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code in (400, 401, 403, 404):
+                    break
+                raise
+
+            rows = _extract_rows(js)
+            if not rows:
+                break
+
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                bid = _branch_id_from_obj(row)
+                bname = _branch_name_from_obj(row)
+                if bid is not None and bname:
+                    names[bid] = bname
+
+            if len(rows) < 100:
+                break
+            page += 1
+
+    return names
+
 # NEW: detail fetch (for DOB, phone, etc.) with cache
 @functools.lru_cache(maxsize=4096)
 def fetch_customer_detail(customer_id: int) -> Dict:
@@ -331,8 +401,9 @@ def groups_of(cust: Dict) -> List[str]:
 
 CID_TO_GROUPS  = {cid: groups_of(c) for cid, c in CUSTOMERS.items()}
 CID_TO_BRANCH  = {cid: _branch_id_from_obj(c) for cid, c in CUSTOMERS.items()}
-BRANCH_IDS     = fetch_available_branches(CUSTOMERS)
-BRANCH_OPTS    = [{"label": f"Branch {bid}", "value": bid} for bid in BRANCH_IDS]
+BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
+BRANCH_IDS     = sorted(set(fetch_available_branches(CUSTOMERS)) | set(BRANCH_NAME_BY_ID.keys()))
+BRANCH_OPTS    = [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS]
 ALL_GROUPS     = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
 GROUP_OPTS     = [{"label": g.title(), "value": g} for g in ALL_GROUPS]
 
@@ -372,7 +443,7 @@ for ap in BRANCH_APPTS:
 
 if not BRANCH_IDS:
     BRANCH_IDS = sorted({b for b in CID_TO_BRANCH.values() if b is not None})
-    BRANCH_OPTS = [{"label": f"Branch {bid}", "value": bid} for bid in BRANCH_IDS]
+    BRANCH_OPTS = [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS]
 
 # ────────── Encounters / Training Status ──────────
 FLAGS = [{}, {"include": "fields"}, {"include": "answers"}, {"full": 1}]
