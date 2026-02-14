@@ -371,12 +371,27 @@ def db_list_comments(customer_ids: Iterable[int] | None) -> List[Dict]:
 def _norm(s: str) -> str:
     return (s or "").strip().lower()
 
+def _deep_merge(target: Dict, source: Dict) -> None:
+    """Deep merge source into target, preferring non-empty values from source."""
+    for key, src_val in source.items():
+        if key not in target:
+            target[key] = src_val
+        elif isinstance(src_val, dict) and isinstance(target.get(key), dict):
+            _deep_merge(target[key], src_val)
+        elif src_val and not target[key]:
+            # Prefer source if target is empty/null
+            target[key] = src_val
+
 def fetch_customers_full() -> Dict[int, Dict]:
     all_customers: Dict[int, Dict] = {}
     endpoints_to_try = [
+        ("customers/list", {"include": "groups,clinic,location,branch"}),
         ("customers/list", {"include": "groups,clinic,location"}),
+        ("customers/list", {"include": "groups,clinic"}),
         ("customers/list", {"include": "groups"}),
+        ("customers", {"include": "groups,clinic,location,branch"}),
         ("customers", {"include": "groups,clinic,location"}),
+        ("customers", {"include": "groups,clinic"}),
         ("customers", {"include": "groups"}),
         ("customers/list", {}),
         ("customers", {}),
@@ -391,15 +406,13 @@ def fetch_customers_full() -> Dict[int, Dict]:
                     if isinstance(c, dict) and c.get("id") is not None:
                         cid = int(c["id"])
                         if cid in all_customers:
-                            existing = all_customers[cid]
-                            for key in c:
-                                if key not in existing and c[key]:
-                                    existing[key] = c[key]
+                            _deep_merge(all_customers[cid], c)
                         else:
-                            all_customers[cid] = c
+                            all_customers[cid] = dict(c)
                 
                 newly_added = len(all_customers) - count_before
-                print(f"Loaded from {endpoint}: {newly_added} new customers")
+                if newly_added > 0:
+                    print(f"  {endpoint} (filters: {base_params}): +{newly_added} customers")
         except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code in (400, 401, 403, 404):
                 pass
@@ -411,8 +424,49 @@ def fetch_customers_full() -> Dict[int, Dict]:
     print(f"Total customers loaded: {len(all_customers)}")
     return all_customers
 
-def fetch_available_branches(customers: Dict[int, Dict]) -> List[int]:
+def fetch_branches_and_clinics_direct() -> Dict[int, Dict]:
+    """Load branches/clinics/locations directly from their endpoints (for clinic-only records)."""
+    all_branches: Dict[int, Dict] = {}
+    branches_endpoints = [
+        ("clinics/list", {}),
+        ("clinics", {}),
+        ("branches/list", {}),
+        ("branches", {}),
+        ("locations/list", {}),
+        ("locations", {}),
+    ]
+
+    for endpoint, base_params in branches_endpoints:
+        try:
+            collected = _fetch_all_rows(endpoint, base_params, page_size=100, max_pages=500)
+            if collected:
+                count_before = len(all_branches)
+                for b in collected:
+                    if isinstance(b, dict) and b.get("id") is not None:
+                        bid = int(b["id"])
+                        if bid not in all_branches:
+                            all_branches[bid] = dict(b)
+                        else:
+                            _deep_merge(all_branches[bid], b)
+                
+                newly_added = len(all_branches) - count_before
+                if newly_added > 0:
+                    print(f"  {endpoint}: +{newly_added} branches/clinics/locations")
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code in (400, 401, 403, 404):
+                pass
+            else:
+                raise
+        except Exception as e:
+            pass
+    
+    print(f"Total branches/clinics loaded directly: {len(all_branches)}")
+    return all_branches
+
+def fetch_available_branches(customers: Dict[int, Dict], direct_branches: Dict[int, Dict] = None) -> List[int]:
     branch_ids: set[int] = set()
+    
+    # Extract from customer data (nested + direct)
     for cust in customers.values():
         if not isinstance(cust, dict):
             continue
@@ -430,6 +484,11 @@ def fetch_available_branches(customers: Dict[int, Dict]) -> List[int]:
                     branch_ids.add(int(obj["id"]))
                 except (TypeError, ValueError):
                     pass
+    
+    # Include all directly-loaded branches/clinics/locations
+    if direct_branches:
+        branch_ids.update(direct_branches.keys())
+    
     return sorted(branch_ids)
 
 def fetch_branch_name_map(customers: Dict[int, Dict]) -> Dict[int, str]:
@@ -570,25 +629,56 @@ BRANCH_IDS: List[int] = []
 BRANCH_OPTS: List[Dict] = []
 ALL_GROUPS: List[str] = []
 GROUP_OPTS: List[Dict] = []
+DIRECT_BRANCHES: Dict[int, Dict] = {}
 
 print("\n" + "="*60)
 print("INITIALIZING TRAINING DASHBOARD")
 print("="*60)
 print(f"API_KEY set: {bool(API_KEY)}")
-print(f"CUSTOMERS loaded: {len(CUSTOMERS)} customers")
-customers_with_branch = len({cid for cid, bid in CID_TO_BRANCH.items() if bid is not None})
-print(f"Customers with branch info: {customers_with_branch}")
 
 try:
-    print(f"\nStep 1: Extract Branch Names")
-    BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
-    print(f"  Found {len(BRANCH_NAME_BY_ID)} branches")
+    print(f"\nStep 1: Load Customers")
+    CUSTOMERS = enrich_customers(fetch_customers_full())
+    print(f"  Loaded: {len(CUSTOMERS)} customers")
     
-    print(f"\nStep 2: Get All Branch IDs")
-    BRANCH_IDS = fetch_available_branches(CUSTOMERS)
+    print(f"\nStep 2: Load Branches/Clinics Directly")
+    DIRECT_BRANCHES = fetch_branches_and_clinics_direct()
+    
+    print(f"\nStep 3: Extract Group Mappings")
+    def groups_of(cust: Dict) -> List[str]:
+        return _group_names_from_customer(cust)
+    
+    CID_TO_GROUPS  = {cid: groups_of(c) for cid, c in CUSTOMERS.items()}
+    CID_TO_BRANCH  = {cid: _branch_id_from_obj(c) for cid, c in CUSTOMERS.items()}
+    customers_with_branch = len({cid for cid, bid in CID_TO_BRANCH.items() if bid is not None})
+    print(f"  Customers with branch info: {customers_with_branch}")
+    
+    for cid, bid in CID_TO_BRANCH.items():
+        if bid is not None:
+            BRANCH_TO_CUSTOMER_IDS.setdefault(int(bid), set()).add(int(cid))
+    
+    BRANCH_TO_GROUPS = {
+        bid: sorted({g for cid in cids for g in CID_TO_GROUPS.get(cid, [])})
+        for bid, cids in BRANCH_TO_CUSTOMER_IDS.items()
+    }
+    
+    print(f"\nStep 4: Extract Branch Names")
+    BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
+    # Add names from directly-loaded branches
+    for bid, branch in DIRECT_BRANCHES.items():
+        if bid not in BRANCH_NAME_BY_ID and isinstance(branch, dict):
+            for name_key in ("name", "title", "label", "code", "clinic_name", "branch_name"):
+                val = branch.get(name_key)
+                if isinstance(val, str) and val.strip():
+                    BRANCH_NAME_BY_ID[bid] = val.strip()
+                    break
+    print(f"  Found {len(BRANCH_NAME_BY_ID)} branch names")
+    
+    print(f"\nStep 5: Get All Branch IDs")
+    BRANCH_IDS = fetch_available_branches(CUSTOMERS, DIRECT_BRANCHES)
     print(f"  Total: {len(BRANCH_IDS)}")
     
-    print(f"\nStep 3: Create Branch Options")
+    print(f"\nStep 6: Create Branch Options")
     BRANCH_OPTS = sorted(
         [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS],
         key=lambda o: (str(o.get("label", "")).casefold(), int(o.get("value", 0)))
@@ -599,9 +689,10 @@ try:
     if len(BRANCH_OPTS) > 5:
         print(f"  ... and {len(BRANCH_OPTS) - 5} more")
     
-    # Step 4: Get all available groups from customers
+    # Step 7: Get all available groups from customers
+    print(f"\nStep 7: Extract Groups")
     ALL_GROUPS = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
-    print(f"Groups from customers: {len(ALL_GROUPS)}")
+    print(f"  Found {len(ALL_GROUPS)} groups")
     if ALL_GROUPS:
         for g in ALL_GROUPS[:3]:  # Show first 3
             print(f"  - {g}")
