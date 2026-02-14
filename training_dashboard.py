@@ -405,68 +405,23 @@ def fetch_customers_full() -> Dict[int, Dict]:
 def fetch_available_branches(customers: Dict[int, Dict]) -> List[int]:
     branch_ids: set[int] = set()
 
-    for endpoint in ("branches/list", "branches"):
-        page = 1
-        while True:
-            try:
-                js = _get(endpoint, page=page, count=100, limit=100)
-            except requests.HTTPError as exc:
-                if exc.response is not None and exc.response.status_code in (400, 401, 403, 404):
-                    break
-                raise
-
-            rows = _extract_rows(js)
-            if not rows:
-                break
-            for row in rows:
-                bid = _branch_id_from_branch_row(row)
-                if bid is not None:
-                    branch_ids.add(bid)
-            if len(rows) < 100:
-                break
-            page += 1
-
+    # First: Extract branches from customers (most reliable)
     for cust in customers.values():
         bid = _branch_id_from_obj(cust)
         if bid is not None:
             branch_ids.add(bid)
-
+    
     return sorted(branch_ids)
 
 def fetch_branch_name_map(customers: Dict[int, Dict]) -> Dict[int, str]:
     names: Dict[int, str] = {}
 
+    # Extract names from customer data (most reliable source)
     for customer in customers.values():
         bid = _branch_id_from_obj(customer)
         bname = _branch_name_from_customer_obj(customer)
         if bid is not None and bname:
             names[bid] = bname
-
-    for endpoint in ("branches/list", "branches"):
-        page = 1
-        while True:
-            try:
-                js = _get(endpoint, page=page, count=100, limit=100)
-            except requests.HTTPError as exc:
-                if exc.response is not None and exc.response.status_code in (400, 401, 403, 404):
-                    break
-                raise
-
-            rows = _extract_rows(js)
-            if not rows:
-                break
-
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                bid = _branch_id_from_branch_row(row)
-                bname = _branch_name_from_obj(row)
-                if bid is not None and bname:
-                    names[bid] = bname
-
-            if len(rows) < 100:
-                break
-            page += 1
 
     return names
 
@@ -556,91 +511,19 @@ def groups_for_branches(branch_values) -> List[str]:
     return sorted(all_groups)
 
 def fetch_groups_for_branches_dynamic(branch_ids: List[int]) -> List[str]:
-    """Dynamic fetch of groups for selected branches, hitting API if needed."""
+    """Get groups for selected branches from customer data."""
     if not branch_ids:
         return []
     
     all_groups: set[str] = set()
     targets = {int(b) for b in branch_ids}
     
-    # First try cached data from customers
+    # Extract groups from customers belonging to selected branches
     for cid, cust in CUSTOMERS.items():
         cbid = _customer_branch(int(cid), cust)
         if cbid in targets:
             cgroups = _customer_groups(int(cid), cust)
             all_groups.update(cgroups)
-    
-    # Additionally, fetch customers directly for each selected clinic/branch
-    # This bypasses the initial cache and gets fresh data
-    for bid in targets:
-        try:
-            # Try fetching customers for this clinic directly
-            for endpoint_template in (f"clinics/{bid}", f"branches/{bid}", f"locations/{bid}"):
-                try:
-                    # Try to get clinic/branch details with customer list
-                    js = _get(endpoint_template, include="customers,groups")
-                    
-                    # Extract clinic/branch object
-                    for wrap_key in ("clinic", "branch", "location"):
-                        obj = js.get(wrap_key)
-                        if isinstance(obj, dict):
-                            # Get groups from the clinic/branch itself
-                            grps = _group_names_from_customer(obj)
-                            all_groups.update(grps)
-                            
-                            # Get customers list if available
-                            for cust_key in ("customers", "customer"):
-                                cust_data = obj.get(cust_key)
-                                if isinstance(cust_data, list):
-                                    for c in cust_data:
-                                        if isinstance(c, dict):
-                                            grps = _group_names_from_customer(c)
-                                            all_groups.update(grps)
-                    
-                    # Also try top-level extraction
-                    if isinstance(js, dict):
-                        grps = _group_names_from_customer(js)
-                        all_groups.update(grps)
-                except requests.HTTPError:
-                    pass
-            
-            # Try fetching customer list filtered by clinic/branch
-            for endpoint in ("customers/list", "customers"):
-                try:
-                    # Try with clinic_id or branch_id filter
-                    js = _get(endpoint, clinic_id=bid, include="groups", count=100)
-                    rows = _extract_rows(js)
-                    for row in rows:
-                        if isinstance(row, dict):
-                            grps = _group_names_from_customer(row)
-                            all_groups.update(grps)
-                except requests.HTTPError:
-                    pass
-                
-                try:
-                    # Try with branch_id filter
-                    js = _get(endpoint, branch_id=bid, include="groups", count=100)
-                    rows = _extract_rows(js)
-                    for row in rows:
-                        if isinstance(row, dict):
-                            grps = _group_names_from_customer(row)
-                            all_groups.update(grps)
-                except requests.HTTPError:
-                    pass
-                    
-                try:
-                    # Try with location_id filter
-                    js = _get(endpoint, location_id=bid, include="groups", count=100)
-                    rows = _extract_rows(js)
-                    for row in rows:
-                        if isinstance(row, dict):
-                            grps = _group_names_from_customer(row)
-                            all_groups.update(grps)
-                except requests.HTTPError:
-                    pass
-        
-        except Exception:
-            pass
     
     return sorted(all_groups)
 
@@ -651,25 +534,46 @@ BRANCH_OPTS: List[Dict] = []
 ALL_GROUPS: List[str] = []
 GROUP_OPTS: List[Dict] = []
 
+print("\n=== INITIALIZING BRANCHES & GROUPS ===")
+print(f"API_KEY set: {bool(API_KEY)}")
+print(f"CUSTOMERS loaded: {len(CUSTOMERS)} customers")
+customers_with_branch = len({cid for cid, bid in CID_TO_BRANCH.items() if bid is not None})
+print(f"Customers with branch info: {customers_with_branch}")
+
 try:
+    # Step 1: Get branch names from customers
     BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
-    BRANCH_IDS     = sorted(set(fetch_available_branches(CUSTOMERS)) | set(BRANCH_NAME_BY_ID.keys()))
-    BRANCH_OPTS    = sorted(
+    print(f"Branch names extracted: {len(BRANCH_NAME_BY_ID)} clinics")
+    
+    # Step 2: Get available branch IDs
+    BRANCH_IDS = fetch_available_branches(CUSTOMERS)
+    print(f"Available branch IDs: {BRANCH_IDS}")
+    
+    # Step 3: Create branch options
+    BRANCH_OPTS = sorted(
         [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS],
         key=lambda o: (str(o.get("label", "")).casefold(), int(o.get("value", 0)))
     )
-    # Get all groups from all branches (used for initial display)
-    # Only try dynamic fetch if API_KEY is set (avoids timeout during startup)
-    if API_KEY:
-        ALL_GROUPS     = sorted(fetch_groups_for_branches_dynamic(BRANCH_IDS) or {g for lst in CID_TO_GROUPS.values() for g in lst})
-    else:
-        ALL_GROUPS     = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
-    GROUP_OPTS     = [{"label": g.title(), "value": g} for g in ALL_GROUPS]
+    print(f"Branch options created: {len(BRANCH_OPTS)}")
+    if BRANCH_OPTS:
+        for opt in BRANCH_OPTS[:3]:  # Show first 3
+            print(f"  - {opt['label']} (ID {opt['value']})")
+    
+    # Step 4: Get all available groups from customers
+    ALL_GROUPS = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
+    print(f"Groups from customers: {len(ALL_GROUPS)}")
+    if ALL_GROUPS:
+        for g in ALL_GROUPS[:3]:  # Show first 3
+            print(f"  - {g}")
+    
+    GROUP_OPTS = [{"label": g.title(), "value": g} for g in ALL_GROUPS]
+    
+    print("\n✓ INITIALIZATION COMPLETE")
 except Exception as e:
-    print(f"WARNING: Failed to fetch branches during initialization: {e}")
+    print(f"\n✗ ERROR during initialization: {e}")
     import traceback
     traceback.print_exc()
-    # Continue with empty branch/group data
+    print("\nContinuing with available data...")
 
 # ────────── Appointments (all known branches) ──────────
 def fetch_branch_appts(branch=1) -> List[Dict]:
@@ -1085,22 +989,20 @@ def register_callbacks(app: dash.Dash):
         State("grp", "value"),
     )
     def sync_group_options_by_branch(selected_branches, selected_groups):
-        # Use dynamic fetching to get groups for selected branches
-        groups = fetch_groups_for_branches_dynamic(selected_branches or [])
-        
-        # Debug logging
+        # Get groups for selected branches (or all groups if no selection)
         if selected_branches:
-            branch_names = [BRANCH_NAME_BY_ID.get(int(b), f"Branch {b}") for b in selected_branches]
-            print(f"\n=== Group Sync Debug ===")
-            print(f"Selected branches: {selected_branches}")
-            print(f"Branch names: {branch_names}")
-            print(f"Groups found: {groups}")
-            print(f"Number of groups: {len(groups)}")
+            groups = fetch_groups_for_branches_dynamic(selected_branches)
+        else:
+            # Show all available groups if no branch selected
+            groups = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
         
         opts = [{"label": g.title(), "value": g} for g in groups]
+        
+        # Preserve selected groups that are still valid
         selected_groups_norm = [_norm(g) for g in (selected_groups or [])]
         allowed_set = {o["value"] for o in opts}
         pruned_selected = [g for g in selected_groups_norm if g in allowed_set]
+        
         return opts, pruned_selected
 
     # ① Load groups → Athlete selector
