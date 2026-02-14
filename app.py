@@ -391,6 +391,28 @@ def enforce_session(_n):
 
 # ───────────────────────── Tab 1: Load customers ─────────────────────────
 @app.callback(
+    Output("t1-group-dd", "options"),
+    Output("t1-group-dd", "value"),
+    Input("t1-branch-dd", "value"),
+    State("t1-group-dd", "value"),
+)
+def t1_sync_groups_by_branch(branch_values, selected_groups):
+    branch_targets = {int(v) for v in (branch_values or [])}
+    if not branch_targets:
+        return td.GROUP_OPTS, selected_groups
+
+    allowed: set[str] = set()
+    for bid in branch_targets:
+        allowed.update(td.BRANCH_TO_GROUPS.get(int(bid), []))
+
+    opts = [{"label": g.title(), "value": g} for g in sorted(allowed)]
+    selected_groups_norm = [td._norm(g) for g in (selected_groups or [])]
+    allowed_set = {o["value"] for o in opts}
+    pruned = [g for g in selected_groups_norm if g in allowed_set]
+    return opts, pruned
+
+
+@app.callback(
     Output("t1-grid-container", "children"),
     Output("t1-rows-json", "data"),
     Output("t1-msg", "children"),
