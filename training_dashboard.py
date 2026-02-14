@@ -349,16 +349,25 @@ def _customer_detail_safe(customer_id: int) -> Dict:
 
 def enrich_customers(customers: Dict[int, Dict]) -> Dict[int, Dict]:
     out: Dict[int, Dict] = {}
+    needs_detail_count = 0
+    
     for cid, customer in customers.items():
         base = dict(customer or {})
         needs_detail = (_branch_id_from_obj(base) is None) or (not _group_names_from_customer(base))
         if needs_detail:
-            detail = _customer_detail_safe(int(cid))
-            if isinstance(detail, dict) and detail:
-                merged = dict(base)
-                merged.update(detail)
-                base = merged
+            needs_detail_count += 1
+            # Only fetch detail for first 50 missing - limit API calls to avoid timeout
+            if needs_detail_count <= 50:
+                detail = _customer_detail_safe(int(cid))
+                if isinstance(detail, dict) and detail:
+                    merged = dict(base)
+                    merged.update(detail)
+                    base = merged
         out[int(cid)] = base
+    
+    if needs_detail_count > 50:
+        print(f"  Note: Skipped detail fetch for {needs_detail_count - 50} customers (limited to 50 API calls)")
+    
     return out
 
 # ────────── SQLite (kept for DB existence; not used here) ──────────
@@ -737,6 +746,7 @@ try:
     print(f"\nStep 1: Load Customers")
     CUSTOMERS = enrich_customers(fetch_customers_full())
     print(f"  Loaded: {len(CUSTOMERS)} customers")
+    print(f"  Enrichment complete, proceeding to next step...")
     
     print(f"\nStep 2: Load Branches/Clinics Directly")
     DIRECT_BRANCHES = fetch_branches_and_clinics_direct()
