@@ -21,7 +21,7 @@ import plotly.graph_objects as go
 
 # ────────── API config ──────────
 API_KEY = os.getenv("JUV_API_KEY")
-BASE    = "https://csipacific.juvonno.com/api"
+BASE    = os.getenv("JUV_API_BASE", "https://csipacific.juvonno.com/api").rstrip("/")
 HEADERS = {"accept": "application/json"}
 
 def _require_api_key():
@@ -31,10 +31,68 @@ def _require_api_key():
         )
 
 def _get(path: str, **params):
+    request_headers = dict(HEADERS)
+    if API_KEY:
+        request_headers.setdefault("x-api-key", API_KEY)
     params.setdefault("api_key", API_KEY)
-    r = requests.get(f"{BASE}/{path.lstrip('/')}", params=params, headers=HEADERS, timeout=20)
+    r = requests.get(f"{BASE}/{path.lstrip('/')}", params=params, headers=request_headers, timeout=20)
     r.raise_for_status()
     return r.json()
+
+def _extract_rows(payload):
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    for key in ("list", "results", "data", "customers", "items"):
+        block = payload.get(key)
+        if isinstance(block, list):
+            return block
+    return []
+
+def _first_non_empty(*vals):
+    for val in vals:
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+def _branch_id_from_obj(obj: Dict) -> Optional[int]:
+    if not isinstance(obj, dict):
+        return None
+    candidates = [obj.get("branch_id"), obj.get("branchId")]
+    branch_obj = obj.get("branch")
+    if isinstance(branch_obj, dict):
+        candidates.extend([branch_obj.get("id"), branch_obj.get("branch_id")])
+    for value in candidates:
+        try:
+            if value is None or value == "":
+                continue
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+def _group_names_from_customer(cust: Dict) -> List[str]:
+    names: List[str] = []
+    for src_key in ("groups", "group", "customer_groups", "tags"):
+        src = cust.get(src_key)
+        if isinstance(src, list):
+            for it in src:
+                if isinstance(it, str):
+                    names.append(_norm(it))
+                elif isinstance(it, dict):
+                    raw = _first_non_empty(
+                        it.get("name"), it.get("label"), it.get("title"), it.get("group_name")
+                    )
+                    if raw:
+                        names.append(_norm(raw))
+        elif isinstance(src, dict):
+            raw = _first_non_empty(src.get("name"), src.get("label"), src.get("title"), src.get("group_name"))
+            if raw:
+                names.append(_norm(raw))
+        elif isinstance(src, str):
+            names.append(_norm(src))
+    return sorted({n for n in names if n})
 
 # ────────── SQLite (kept for DB existence; not used here) ──────────
 DB_PATH = os.path.join(os.path.dirname(__file__), "comments.db")
@@ -75,15 +133,75 @@ def _norm(s: str) -> str:
     return (s or "").strip().lower()
 
 def fetch_customers_full() -> Dict[int, Dict]:
-    out, page = [], 1
-    while True:
-        js = _get("customers/list", include="groups", page=page, count=100, status="ACTIVE")
-        rows = js.get("list", js)
-        if not rows: break
-        out.extend(rows)
-        if len(rows) < 100: break
-        page += 1
-    return {c["id"]: c for c in out if c.get("id")}
+    out: List[Dict] = []
+    attempts = [
+        ("customers/list", {"include": "groups", "status": "ACTIVE"}),
+        ("customers", {"include": "groups", "status": "ACTIVE"}),
+        ("customers", {"status": "ACTIVE"}),
+    ]
+
+    for endpoint, base_params in attempts:
+        collected: List[Dict] = []
+        page = 1
+        while True:
+            params = dict(base_params)
+            params.update({"page": page, "count": 100, "limit": 100})
+            try:
+                js = _get(endpoint, **params)
+            except requests.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code in (400, 404):
+                    collected = []
+                    break
+                raise
+
+            rows = _extract_rows(js)
+            if not rows:
+                if page == 1 and isinstance(js, dict) and js.get("id"):
+                    rows = [js]
+                else:
+                    break
+
+            collected.extend([row for row in rows if isinstance(row, dict)])
+            if len(rows) < 100:
+                break
+            page += 1
+
+        if collected:
+            out = collected
+            break
+
+    return {int(c["id"]): c for c in out if isinstance(c, dict) and c.get("id") is not None}
+
+def fetch_available_branches(customers: Dict[int, Dict]) -> List[int]:
+    branch_ids: set[int] = set()
+
+    for endpoint in ("branches/list", "branches"):
+        page = 1
+        while True:
+            try:
+                js = _get(endpoint, page=page, count=100, limit=100)
+            except requests.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code in (400, 404):
+                    break
+                raise
+
+            rows = _extract_rows(js)
+            if not rows:
+                break
+            for row in rows:
+                bid = _branch_id_from_obj(row)
+                if bid is not None:
+                    branch_ids.add(bid)
+            if len(rows) < 100:
+                break
+            page += 1
+
+    for cust in customers.values():
+        bid = _branch_id_from_obj(cust)
+        if bid is not None:
+            branch_ids.add(bid)
+
+    return sorted(branch_ids)
 
 # NEW: detail fetch (for DOB, phone, etc.) with cache
 @functools.lru_cache(maxsize=4096)
@@ -100,38 +218,52 @@ _require_api_key()
 CUSTOMERS = fetch_customers_full()
 
 def groups_of(cust: Dict) -> List[str]:
-    src = cust.get("groups") if "groups" in cust else cust.get("group")
-    names: List[str] = []
-    if isinstance(src, list):
-        for it in src:
-            if isinstance(it, str): names.append(_norm(it))
-            elif isinstance(it, dict) and it.get("name"): names.append(_norm(it["name"]))
-    elif isinstance(src, dict) and src.get("name"): names.append(_norm(src["name"]))
-    elif isinstance(src, str): names.append(_norm(src))
-    return names
+    return _group_names_from_customer(cust)
 
-CID_TO_GROUPS = {cid: groups_of(c) for cid, c in CUSTOMERS.items()}
-ALL_GROUPS    = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
-GROUP_OPTS    = [{"label": g.title(), "value": g} for g in ALL_GROUPS]
+CID_TO_GROUPS  = {cid: groups_of(c) for cid, c in CUSTOMERS.items()}
+CID_TO_BRANCH  = {cid: _branch_id_from_obj(c) for cid, c in CUSTOMERS.items()}
+BRANCH_IDS     = fetch_available_branches(CUSTOMERS)
+BRANCH_OPTS    = [{"label": f"Branch {bid}", "value": bid} for bid in BRANCH_IDS]
+ALL_GROUPS     = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
+GROUP_OPTS     = [{"label": g.title(), "value": g} for g in ALL_GROUPS]
 
-# ────────── Appointments (branch 1) ──────────
+# ────────── Appointments (all known branches) ──────────
 def fetch_branch_appts(branch=1) -> List[Dict]:
     rows, page = [], 1
     while True:
         js = _get(f"appointments/list/{branch}", start_date="2000-01-01", status="all", page=page, count=100)
-        block = js.get("list", js)
+        block = _extract_rows(js)
         if not block: break
         rows.extend(block)
         if len(block) < 100: break
         page += 1
     return rows
 
-BRANCH_APPTS     = fetch_branch_appts(1)
+def fetch_all_branch_appts(branch_ids: List[int]) -> List[Dict]:
+    all_appts: List[Dict] = []
+    targets = branch_ids or [1]
+    for bid in targets:
+        try:
+            all_appts.extend(fetch_branch_appts(int(bid)))
+        except requests.HTTPError:
+            continue
+    return all_appts
+
+BRANCH_APPTS     = fetch_all_branch_appts(BRANCH_IDS)
 CID_TO_APPTS: Dict[int, List[Dict]] = {}
 for ap in BRANCH_APPTS:
     cust = ap.get("customer", {})
     if isinstance(cust, dict) and cust.get("id"):
-        CID_TO_APPTS.setdefault(cust["id"], []).append(ap)
+        cid = int(cust["id"])
+        CID_TO_APPTS.setdefault(cid, []).append(ap)
+        if CID_TO_BRANCH.get(cid) is None:
+            ap_branch = _branch_id_from_obj(ap)
+            if ap_branch is not None:
+                CID_TO_BRANCH[cid] = ap_branch
+
+if not BRANCH_IDS:
+    BRANCH_IDS = sorted({b for b in CID_TO_BRANCH.values() if b is not None})
+    BRANCH_OPTS = [{"label": f"Branch {bid}", "value": bid} for bid in BRANCH_IDS]
 
 # ────────── Encounters / Training Status ──────────
 FLAGS = [{}, {"include": "fields"}, {"include": "answers"}, {"full": 1}]
@@ -380,8 +512,10 @@ def layout_body():
 
         # Filters / selection
         dbc.Row([
+            dbc.Col(dcc.Dropdown(id="branch", options=BRANCH_OPTS, multi=True,
+                                 placeholder="Select branch(es)…"), md=4),
             dbc.Col(dcc.Dropdown(id="grp", options=GROUP_OPTS, multi=True,
-                                 placeholder="Select patient group(s)…"), md=6),
+                                 placeholder="Select patient group(s)…"), md=4),
             dbc.Col(dbc.Button("Load", id="go", color="primary", className="w-100"), md=2),
         ], className="g-2"),
         html.Hr(),
@@ -462,17 +596,20 @@ def register_callbacks(app: dash.Dash):
         Output("customer-checklist-container", "children"),
         Output("msg", "children"), Output("msg", "is_open"),
         Input("go", "n_clicks"),
+        State("branch", "value"),
         State("grp", "value"),
         prevent_initial_call=True,
     )
-    def make_customer_selector(n_clicks, groups_raw):
-        if not groups_raw:
-            return no_update, "Select at least one group.", True
-        targets = {_norm(g) for g in groups_raw}
+    def make_customer_selector(n_clicks, branch_raw, groups_raw):
+        if not groups_raw and not branch_raw:
+            return no_update, "Select at least one branch or group.", True
+        targets = {_norm(g) for g in (groups_raw or [])}
+        branch_targets = {int(v) for v in (branch_raw or [])}
         matching = [
             {"label": f"{c['first_name']} {c['last_name']} (ID {cid})", "value": cid}
             for cid, c in CUSTOMERS.items()
-            if targets & set(CID_TO_GROUPS.get(cid, []))
+            if ((not targets) or (targets & set(CID_TO_GROUPS.get(cid, []))))
+            and ((not branch_targets) or (CID_TO_BRANCH.get(cid) in branch_targets))
         ]
         if not matching:
             return html.Div("No patients in those groups."), "", False
