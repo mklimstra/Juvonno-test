@@ -40,9 +40,15 @@ def _get(path: str, **params):
     if API_KEY:
         request_headers.setdefault("x-api-key", API_KEY)
     params.setdefault("api_key", API_KEY)
-    r = requests.get(f"{BASE}/{path.lstrip('/')}", params=params, headers=request_headers, timeout=20)
-    r.raise_for_status()
-    return r.json()
+    try:
+        # Use shorter timeout to avoid hanging at startup
+        r = requests.get(f"{BASE}/{path.lstrip('/')}", params=params, headers=request_headers, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except requests.exceptions.Timeout:
+        raise RuntimeError(f"API request timeout for {path}")
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"API request failed for {path}: {e}")
 
 def _extract_rows(payload):
     if isinstance(payload, list):
@@ -653,7 +659,11 @@ try:
         key=lambda o: (str(o.get("label", "")).casefold(), int(o.get("value", 0)))
     )
     # Get all groups from all branches (used for initial display)
-    ALL_GROUPS     = sorted(fetch_groups_for_branches_dynamic(BRANCH_IDS) or {g for lst in CID_TO_GROUPS.values() for g in lst})
+    # Only try dynamic fetch if API_KEY is set (avoids timeout during startup)
+    if API_KEY:
+        ALL_GROUPS     = sorted(fetch_groups_for_branches_dynamic(BRANCH_IDS) or {g for lst in CID_TO_GROUPS.values() for g in lst})
+    else:
+        ALL_GROUPS     = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
     GROUP_OPTS     = [{"label": g.title(), "value": g} for g in ALL_GROUPS]
 except Exception as e:
     print(f"WARNING: Failed to fetch branches during initialization: {e}")
