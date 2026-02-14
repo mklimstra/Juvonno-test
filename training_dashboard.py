@@ -372,57 +372,94 @@ def _norm(s: str) -> str:
     return (s or "").strip().lower()
 
 def fetch_customers_full() -> Dict[int, Dict]:
-    out: List[Dict] = []
-    attempts = [
+    all_customers: Dict[int, Dict] = {}
+    endpoints_to_try = [
         ("customers/list", {"include": "groups,clinic,location"}),
         ("customers/list", {"include": "groups"}),
         ("customers", {"include": "groups,clinic,location"}),
         ("customers", {"include": "groups"}),
-        ("customers/list", {"include": "groups,clinic,location", "status": "ACTIVE"}),
-        ("customers/list", {"include": "groups", "status": "ACTIVE"}),
-        ("customers", {"include": "groups,clinic,location", "status": "ACTIVE"}),
-        ("customers", {"include": "groups", "status": "ACTIVE"}),
         ("customers/list", {}),
         ("customers", {}),
     ]
 
-    for endpoint, base_params in attempts:
-        collected: List[Dict] = []
+    for endpoint, base_params in endpoints_to_try:
         try:
-            collected = _fetch_all_rows(endpoint, base_params, page_size=100)
+            collected = _fetch_all_rows(endpoint, base_params, page_size=100, max_pages=500)
+            if collected:
+                count_before = len(all_customers)
+                for c in collected:
+                    if isinstance(c, dict) and c.get("id") is not None:
+                        cid = int(c["id"])
+                        if cid in all_customers:
+                            existing = all_customers[cid]
+                            for key in c:
+                                if key not in existing and c[key]:
+                                    existing[key] = c[key]
+                        else:
+                            all_customers[cid] = c
+                
+                newly_added = len(all_customers) - count_before
+                print(f"Loaded from {endpoint}: {newly_added} new customers")
         except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code in (400, 401, 403, 404):
-                collected = []
+                pass
             else:
                 raise
-
-        if collected:
-            out = collected
-            break
-
-    return {int(c["id"]): c for c in out if isinstance(c, dict) and c.get("id") is not None}
+        except Exception as e:
+            pass
+    
+    print(f"Total customers loaded: {len(all_customers)}")
+    return all_customers
 
 def fetch_available_branches(customers: Dict[int, Dict]) -> List[int]:
     branch_ids: set[int] = set()
-
-    # First: Extract branches from customers (most reliable)
     for cust in customers.values():
-        bid = _branch_id_from_obj(cust)
-        if bid is not None:
-            branch_ids.add(bid)
-    
+        if not isinstance(cust, dict):
+            continue
+        for key in ("branch_id", "branchId", "clinic_id", "location_id", "site_id"):
+            val = cust.get(key)
+            if val is not None:
+                try:
+                    branch_ids.add(int(val))
+                except (TypeError, ValueError):
+                    pass
+        for obj_key in ("branch", "clinic", "location"):
+            obj = cust.get(obj_key)
+            if isinstance(obj, dict) and obj.get("id"):
+                try:
+                    branch_ids.add(int(obj["id"]))
+                except (TypeError, ValueError):
+                    pass
     return sorted(branch_ids)
 
 def fetch_branch_name_map(customers: Dict[int, Dict]) -> Dict[int, str]:
     names: Dict[int, str] = {}
-
-    # Extract names from customer data (most reliable source)
     for customer in customers.values():
+        if not isinstance(customer, dict):
+            continue
+        for obj_key in ("clinic", "branch", "location"):
+            obj = customer.get(obj_key)
+            if isinstance(obj, dict):
+                bid = None
+                for id_key in ("id", "clinic_id", "branch_id", "location_id"):
+                    val = obj.get(id_key)
+                    if val is not None:
+                        try:
+                            bid = int(val)
+                            break
+                        except (TypeError, ValueError):
+                            pass
+                if bid is not None:
+                    for name_key in ("name", "title", "label", "code"):
+                        val = obj.get(name_key)
+                        if isinstance(val, str) and val.strip():
+                            names[bid] = val.strip()
+                            break
         bid = _branch_id_from_obj(customer)
-        bname = _branch_name_from_customer_obj(customer)
-        if bid is not None and bname:
-            names[bid] = bname
-
+        if bid is not None:
+            bname = _branch_name_from_customer_obj(customer)
+            if bname and bid not in names:
+                names[bid] = bname
     return names
 
 # NEW: detail fetch (for DOB, phone, etc.) with cache
@@ -534,30 +571,33 @@ BRANCH_OPTS: List[Dict] = []
 ALL_GROUPS: List[str] = []
 GROUP_OPTS: List[Dict] = []
 
-print("\n=== INITIALIZING BRANCHES & GROUPS ===")
+print("\n" + "="*60)
+print("INITIALIZING TRAINING DASHBOARD")
+print("="*60)
 print(f"API_KEY set: {bool(API_KEY)}")
 print(f"CUSTOMERS loaded: {len(CUSTOMERS)} customers")
 customers_with_branch = len({cid for cid, bid in CID_TO_BRANCH.items() if bid is not None})
 print(f"Customers with branch info: {customers_with_branch}")
 
 try:
-    # Step 1: Get branch names from customers
+    print(f"\nStep 1: Extract Branch Names")
     BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
-    print(f"Branch names extracted: {len(BRANCH_NAME_BY_ID)} clinics")
+    print(f"  Found {len(BRANCH_NAME_BY_ID)} branches")
     
-    # Step 2: Get available branch IDs
+    print(f"\nStep 2: Get All Branch IDs")
     BRANCH_IDS = fetch_available_branches(CUSTOMERS)
-    print(f"Available branch IDs: {BRANCH_IDS}")
+    print(f"  Total: {len(BRANCH_IDS)}")
     
-    # Step 3: Create branch options
+    print(f"\nStep 3: Create Branch Options")
     BRANCH_OPTS = sorted(
         [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS],
         key=lambda o: (str(o.get("label", "")).casefold(), int(o.get("value", 0)))
     )
-    print(f"Branch options created: {len(BRANCH_OPTS)}")
-    if BRANCH_OPTS:
-        for opt in BRANCH_OPTS[:3]:  # Show first 3
-            print(f"  - {opt['label']} (ID {opt['value']})")
+    print(f"  Created: {len(BRANCH_OPTS)} options")
+    for i, opt in enumerate(BRANCH_OPTS[:5], 1):
+        print(f"  {i}. {opt['label']}")
+    if len(BRANCH_OPTS) > 5:
+        print(f"  ... and {len(BRANCH_OPTS) - 5} more")
     
     # Step 4: Get all available groups from customers
     ALL_GROUPS = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
@@ -618,14 +658,12 @@ except Exception as e:
     # Continue with empty appointments
 
 if not BRANCH_IDS:
-    try:
-        BRANCH_IDS = sorted({b for b in CID_TO_BRANCH.values() if b is not None})
+    BRANCH_IDS = sorted({b for b in CID_TO_BRANCH.values() if b is not None})
+    if BRANCH_IDS:
         BRANCH_OPTS = sorted(
             [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS],
             key=lambda o: (str(o.get("label", "")).casefold(), int(o.get("value", 0)))
         )
-    except Exception as e:
-        print(f"WARNING: Failed to rebuild branch options: {e}")
 
 # ────────── Encounters / Training Status ──────────
 FLAGS = [{}, {"include": "fields"}, {"include": "answers"}, {"full": 1}]
