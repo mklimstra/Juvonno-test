@@ -277,6 +277,8 @@ def _group_names_from_customer(cust: Dict, debug: bool = False) -> List[str]:
 def _fetch_all_rows(endpoint: str, base_params: Dict, page_size: int = 100, max_pages: int = 500) -> List[Dict]:
     rows_out: List[Dict] = []
     seen_ids: set[int] = set()
+    
+    print(f"      Fetching {endpoint}...", end=" ")
 
     for page_index in range(max_pages):
         params = dict(base_params)
@@ -289,6 +291,7 @@ def _fetch_all_rows(endpoint: str, base_params: Dict, page_size: int = 100, max_
         js = _get(endpoint, **params)
         rows = [row for row in _extract_rows(js) if isinstance(row, dict)]
         if not rows:
+            print(f"page {page_index + 1}: no rows")
             break
 
         new_added = 0
@@ -312,13 +315,23 @@ def _fetch_all_rows(endpoint: str, base_params: Dict, page_size: int = 100, max_
 
         total = _extract_total(js)
         has_more = _extract_has_more(js)
+        
+        print(f"page {page_index + 1}: {new_added} added (total: {len(seen_ids)}, total_in_api: {total}, has_more: {has_more})", end=" ")
+        
         if total is not None and len(seen_ids) >= total:
+            print("(reached total)")
             break
         if has_more is False:
+            print("(no more pages)")
             break
-        if new_added == 0 or len(rows) < page_size:
+        if new_added == 0:
+            print("(no new rows)")
+            break
+        if len(rows) < page_size:
+            print("(fewer than page_size)")
             break
 
+    print(f"\n      Final count: {len(rows_out)} rows")
     return rows_out
 
 def _customer_detail_safe(customer_id: int) -> Dict:
@@ -414,6 +427,7 @@ def fetch_customers_full() -> Dict[int, Dict]:
 
     for endpoint, base_params in endpoints_to_try:
         try:
+            print(f"  Trying {endpoint} with params {base_params}...")
             collected = _fetch_all_rows(endpoint, base_params, page_size=100, max_pages=500)
             if collected:
                 count_before = len(all_customers)
@@ -427,16 +441,21 @@ def fetch_customers_full() -> Dict[int, Dict]:
                 
                 newly_added = len(all_customers) - count_before
                 if newly_added > 0:
-                    print(f"  {endpoint} (filters: {base_params}): +{newly_added} customers")
+                    print(f"    ✓ +{newly_added} customers (total so far: {len(all_customers)})")
+                else:
+                    print(f"    - No new customers")
+            else:
+                print(f"    - No rows returned")
         except requests.HTTPError as exc:
             if exc.response is not None and exc.response.status_code in (400, 401, 403, 404):
-                pass
+                print(f"    - Endpoint not found or forbidden")
             else:
+                print(f"    - HTTP Error: {exc}")
                 raise
         except Exception as e:
-            pass
+            print(f"    - Error: {e}")
     
-    print(f"Total customers loaded: {len(all_customers)}")
+    print(f"\nTotal customers loaded: {len(all_customers)}")
     return all_customers
 
 def fetch_branches_and_clinics_direct() -> Dict[int, Dict]:
@@ -805,8 +824,8 @@ try:
     
     # Step 8: Extract Groups - combine from customers + dedicated group records + branch assignments
     print(f"\nStep 8: Extract and Map Groups")
-    # Groups from customers
-    customer_groups = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
+    # Groups from customers (as set for union operations)
+    customer_groups_set = {g for lst in CID_TO_GROUPS.values() for g in lst}
     # Groups from directly-loaded branches/clinics
     direct_branch_groups: set[str] = set()
     for branch in DIRECT_BRANCHES.values():
@@ -875,9 +894,9 @@ try:
             has_group_mapping = "yes" if bid in BRANCH_TO_GROUP_IDS else "no"
             print(f"    - {name}: {cust_count} customers, direct_branch={has_direct_record}, group_mapping={has_group_mapping}")
     
-    ALL_GROUPS = sorted(customer_groups | direct_branch_groups | dedicated_group_names)
+    ALL_GROUPS = sorted(customer_groups_set | direct_branch_groups | dedicated_group_names)
     print(f"\n  Summary: {len(ALL_GROUPS)} total groups across {branches_with_groups} branches with groups")
-    print(f"    - {len(customer_groups)} from customers")
+    print(f"    - {len(customer_groups_set)} from customers")
     print(f"    - {len(direct_branch_groups)} from clinic records")
     print(f"    - {len(dedicated_group_names)} from dedicated group records")
     print(f"    - {branches_without_groups} branches with NO groups found")
