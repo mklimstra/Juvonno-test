@@ -44,10 +44,19 @@ def _extract_rows(payload):
         return payload
     if not isinstance(payload, dict):
         return []
-    for key in ("list", "results", "data", "customers", "items"):
+    for key in ("list", "results", "data", "customers", "items", "branches", "clinics", "locations", "sites"):
         block = payload.get(key)
         if isinstance(block, list):
             return block
+        if isinstance(block, dict):
+            for nested_key in ("list", "results", "data", "items", "branches", "clinics", "locations", "sites"):
+                nested_block = block.get(nested_key)
+                if isinstance(nested_block, list):
+                    return nested_block
+
+    for value in payload.values():
+        if isinstance(value, list) and value and all(isinstance(x, dict) for x in value):
+            return value
     return []
 
 def _extract_total(payload) -> Optional[int]:
@@ -83,6 +92,7 @@ def _branch_id_from_obj(obj: Dict) -> Optional[int]:
     if not isinstance(obj, dict):
         return None
     candidates = [
+        obj.get("id"),
         obj.get("branch_id"), obj.get("branchId"), obj.get("clinic_id"),
         obj.get("location_id"), obj.get("site_id")
     ]
