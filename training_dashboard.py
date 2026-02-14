@@ -545,41 +545,75 @@ def fetch_groups_for_branches_dynamic(branch_ids: List[int]) -> List[str]:
             cgroups = _customer_groups(int(cid), cust)
             all_groups.update(cgroups)
     
-    # Additionally, try to fetch groups from clinic/branch endpoints
+    # Additionally, fetch customers directly for each selected clinic/branch
+    # This bypasses the initial cache and gets fresh data
     for bid in targets:
         try:
-            # Try clinic endpoint
-            try:
-                js = _get(f"clinics/{bid}", include="groups")
-                if isinstance(js, dict):
-                    clinic_obj = js.get("clinic", js)
-                    if isinstance(clinic_obj, dict):
-                        grps = _group_names_from_customer(clinic_obj)
+            # Try fetching customers for this clinic directly
+            for endpoint_template in (f"clinics/{bid}", f"branches/{bid}", f"locations/{bid}"):
+                try:
+                    # Try to get clinic/branch details with customer list
+                    js = _get(endpoint_template, include="customers,groups")
+                    
+                    # Extract clinic/branch object
+                    for wrap_key in ("clinic", "branch", "location"):
+                        obj = js.get(wrap_key)
+                        if isinstance(obj, dict):
+                            # Get groups from the clinic/branch itself
+                            grps = _group_names_from_customer(obj)
+                            all_groups.update(grps)
+                            
+                            # Get customers list if available
+                            for cust_key in ("customers", "customer"):
+                                cust_data = obj.get(cust_key)
+                                if isinstance(cust_data, list):
+                                    for c in cust_data:
+                                        if isinstance(c, dict):
+                                            grps = _group_names_from_customer(c)
+                                            all_groups.update(grps)
+                    
+                    # Also try top-level extraction
+                    if isinstance(js, dict):
+                        grps = _group_names_from_customer(js)
                         all_groups.update(grps)
-            except requests.HTTPError:
-                pass
+                except requests.HTTPError:
+                    pass
             
-            # Try branch endpoint
-            try:
-                js = _get(f"branches/{bid}", include="groups")
-                if isinstance(js, dict):
-                    branch_obj = js.get("branch", js)
-                    if isinstance(branch_obj, dict):
-                        grps = _group_names_from_customer(branch_obj)
-                        all_groups.update(grps)
-            except requests.HTTPError:
-                pass
-            
-            # Try location endpoint
-            try:
-                js = _get(f"locations/{bid}", include="groups")
-                if isinstance(js, dict):
-                    location_obj = js.get("location", js)
-                    if isinstance(location_obj, dict):
-                        grps = _group_names_from_customer(location_obj)
-                        all_groups.update(grps)
-            except requests.HTTPError:
-                pass
+            # Try fetching customer list filtered by clinic/branch
+            for endpoint in ("customers/list", "customers"):
+                try:
+                    # Try with clinic_id or branch_id filter
+                    js = _get(endpoint, clinic_id=bid, include="groups", count=100)
+                    rows = _extract_rows(js)
+                    for row in rows:
+                        if isinstance(row, dict):
+                            grps = _group_names_from_customer(row)
+                            all_groups.update(grps)
+                except requests.HTTPError:
+                    pass
+                
+                try:
+                    # Try with branch_id filter
+                    js = _get(endpoint, branch_id=bid, include="groups", count=100)
+                    rows = _extract_rows(js)
+                    for row in rows:
+                        if isinstance(row, dict):
+                            grps = _group_names_from_customer(row)
+                            all_groups.update(grps)
+                except requests.HTTPError:
+                    pass
+                    
+                try:
+                    # Try with location_id filter
+                    js = _get(endpoint, location_id=bid, include="groups", count=100)
+                    rows = _extract_rows(js)
+                    for row in rows:
+                        if isinstance(row, dict):
+                            grps = _group_names_from_customer(row)
+                            all_groups.update(grps)
+                except requests.HTTPError:
+                    pass
+        
         except Exception:
             pass
     
@@ -1001,6 +1035,16 @@ def register_callbacks(app: dash.Dash):
     def sync_group_options_by_branch(selected_branches, selected_groups):
         # Use dynamic fetching to get groups for selected branches
         groups = fetch_groups_for_branches_dynamic(selected_branches or [])
+        
+        # Debug logging
+        if selected_branches:
+            branch_names = [BRANCH_NAME_BY_ID.get(int(b), f"Branch {b}") for b in selected_branches]
+            print(f"\n=== Group Sync Debug ===")
+            print(f"Selected branches: {selected_branches}")
+            print(f"Branch names: {branch_names}")
+            print(f"Groups found: {groups}")
+            print(f"Number of groups: {len(groups)}")
+        
         opts = [{"label": g.title(), "value": g} for g in groups]
         selected_groups_norm = [_norm(g) for g in (selected_groups or [])]
         allowed_set = {o["value"] for o in opts}
