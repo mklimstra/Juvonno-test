@@ -187,50 +187,65 @@ def _branch_name_from_customer_obj(obj: Dict) -> str:
 
 def _group_names_from_customer(cust: Dict) -> List[str]:
     names: List[str] = []
-    for src_key in ("groups", "group", "customer_groups", "patient_groups", "tags"):
-        src = cust.get(src_key)
-        if isinstance(src, list):
-            for it in src:
-                if isinstance(it, str):
-                    for token in re.split(r"[,;|]", it):
-                        token_n = _norm(token)
-                        if token_n:
-                            names.append(token_n)
-                elif isinstance(it, dict):
-                    raw = _first_non_empty(
-                        it.get("name"), it.get("label"), it.get("title"), it.get("group_name")
-                    )
-                    if raw:
-                        names.append(_norm(raw))
-                    nested_group = it.get("group")
-                    if isinstance(nested_group, dict):
-                        raw_nested = _first_non_empty(
-                            nested_group.get("name"),
-                            nested_group.get("label"),
-                            nested_group.get("title"),
-                            nested_group.get("group_name"),
+    
+    # Helper to extract groups from a container (clinic, location, or top-level)
+    def _extract_from_container(container: Dict, search_keys: Iterable[str]):
+        for src_key in search_keys:
+            src = container.get(src_key)
+            if isinstance(src, list):
+                for it in src:
+                    if isinstance(it, str):
+                        for token in re.split(r"[,;|]", it):
+                            token_n = _norm(token)
+                            if token_n:
+                                names.append(token_n)
+                    elif isinstance(it, dict):
+                        raw = _first_non_empty(
+                            it.get("name"), it.get("label"), it.get("title"), it.get("group_name")
                         )
-                        if raw_nested:
-                            names.append(_norm(raw_nested))
-        elif isinstance(src, dict):
-            raw = _first_non_empty(src.get("name"), src.get("label"), src.get("title"), src.get("group_name"))
-            if raw:
-                names.append(_norm(raw))
-            nested_group = src.get("group")
-            if isinstance(nested_group, dict):
-                raw_nested = _first_non_empty(
-                    nested_group.get("name"),
-                    nested_group.get("label"),
-                    nested_group.get("title"),
-                    nested_group.get("group_name"),
-                )
-                if raw_nested:
-                    names.append(_norm(raw_nested))
-        elif isinstance(src, str):
-            for token in re.split(r"[,;|]", src):
-                token_n = _norm(token)
-                if token_n:
-                    names.append(token_n)
+                        if raw:
+                            names.append(_norm(raw))
+                        nested_group = it.get("group")
+                        if isinstance(nested_group, dict):
+                            raw_nested = _first_non_empty(
+                                nested_group.get("name"),
+                                nested_group.get("label"),
+                                nested_group.get("title"),
+                                nested_group.get("group_name"),
+                            )
+                            if raw_nested:
+                                names.append(_norm(raw_nested))
+            elif isinstance(src, dict):
+                raw = _first_non_empty(src.get("name"), src.get("label"), src.get("title"), src.get("group_name"))
+                if raw:
+                    names.append(_norm(raw))
+                nested_group = src.get("group")
+                if isinstance(nested_group, dict):
+                    raw_nested = _first_non_empty(
+                        nested_group.get("name"),
+                        nested_group.get("label"),
+                        nested_group.get("title"),
+                        nested_group.get("group_name"),
+                    )
+                    if raw_nested:
+                        names.append(_norm(raw_nested))
+            elif isinstance(src, str):
+                for token in re.split(r"[,;|]", src):
+                    token_n = _norm(token)
+                    if token_n:
+                        names.append(token_n)
+    
+    group_keys = ("groups", "group", "customer_groups", "patient_groups", "tags")
+    
+    # Extract from top-level first
+    _extract_from_container(cust, group_keys)
+    
+    # Extract from nested clinic/location/branch containers (clinic-aware)
+    for container_key in ("clinic", "location", "branch"):
+        container = cust.get(container_key)
+        if isinstance(container, dict):
+            _extract_from_container(container, group_keys)
+    
     return sorted({n for n in names if n})
 
 def _fetch_all_rows(endpoint: str, base_params: Dict, page_size: int = 100, max_pages: int = 500) -> List[Dict]:
@@ -348,12 +363,16 @@ def _norm(s: str) -> str:
 def fetch_customers_full() -> Dict[int, Dict]:
     out: List[Dict] = []
     attempts = [
+        ("customers/list", {"include": "groups,clinic,location"}),
         ("customers/list", {"include": "groups"}),
+        ("customers", {"include": "groups,clinic,location"}),
         ("customers", {"include": "groups"}),
+        ("customers/list", {"include": "groups,clinic,location", "status": "ACTIVE"}),
+        ("customers/list", {"include": "groups", "status": "ACTIVE"}),
+        ("customers", {"include": "groups,clinic,location", "status": "ACTIVE"}),
+        ("customers", {"include": "groups", "status": "ACTIVE"}),
         ("customers/list", {}),
         ("customers", {}),
-        ("customers/list", {"include": "groups", "status": "ACTIVE"}),
-        ("customers", {"include": "groups", "status": "ACTIVE"}),
     ]
 
     for endpoint, base_params in attempts:
@@ -444,7 +463,7 @@ def fetch_branch_name_map(customers: Dict[int, Dict]) -> Dict[int, str]:
 @functools.lru_cache(maxsize=4096)
 def fetch_customer_detail(customer_id: int) -> Dict:
     try:
-        js = _get(f"customers/{int(customer_id)}", include="full")
+        js = _get(f"customers/{int(customer_id)}", include="full,groups,clinic,location")
         if isinstance(js, dict):
             return js.get("customer", js)
     except Exception:
@@ -469,6 +488,22 @@ BRANCH_TO_GROUPS = {
     for bid, cids in BRANCH_TO_CUSTOMER_IDS.items()
 }
 
+def _customer_branch(cid: int, cust: Optional[Dict] = None) -> Optional[int]:
+    bid = CID_TO_BRANCH.get(int(cid))
+    if bid is not None:
+        return bid
+    if isinstance(cust, dict):
+        return _branch_id_from_obj(cust)
+    return None
+
+def _customer_groups(cid: int, cust: Optional[Dict] = None) -> List[str]:
+    vals = CID_TO_GROUPS.get(int(cid), [])
+    if vals:
+        return vals
+    if isinstance(cust, dict):
+        return _group_names_from_customer(cust)
+    return []
+
 def groups_for_branches(branch_values) -> List[str]:
     selected: set[int] = set()
     for value in (branch_values or []):
@@ -479,13 +514,21 @@ def groups_for_branches(branch_values) -> List[str]:
         except (TypeError, ValueError):
             continue
 
-    if not selected:
-        return [g["value"] for g in GROUP_OPTS]
+    all_groups: set[str] = set()
+    for cid, cust in CUSTOMERS.items():
+        cgroups = _customer_groups(int(cid), cust)
+        if not cgroups:
+            continue
 
-    groups: set[str] = set()
-    for bid in selected:
-        groups.update(BRANCH_TO_GROUPS.get(int(bid), []))
-    return sorted(groups)
+        if not selected:
+            all_groups.update(cgroups)
+            continue
+
+        cbid = _customer_branch(int(cid), cust)
+        if cbid in selected:
+            all_groups.update(cgroups)
+
+    return sorted(all_groups)
 
 BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
 BRANCH_IDS     = sorted(set(fetch_available_branches(CUSTOMERS)) | set(BRANCH_NAME_BY_ID.keys()))
@@ -923,8 +966,8 @@ def register_callbacks(app: dash.Dash):
         matching = [
             {"label": f"{c['first_name']} {c['last_name']} (ID {cid})", "value": cid}
             for cid, c in CUSTOMERS.items()
-            if ((not targets) or (targets & set(CID_TO_GROUPS.get(cid, []))))
-            and ((not branch_targets) or (CID_TO_BRANCH.get(cid) in branch_targets))
+            if ((not targets) or (targets & set(_customer_groups(cid, c))))
+            and ((not branch_targets) or (_customer_branch(cid, c) in branch_targets))
         ]
         if not matching:
             return html.Div("No patients match the selected branch/group filters."), "", False
