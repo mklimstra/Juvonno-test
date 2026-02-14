@@ -606,8 +606,8 @@ def groups_for_branches(branch_values) -> List[str]:
 
     return sorted(all_groups)
 
-def fetch_groups_for_branches_dynamic(branch_ids: List[int]) -> List[str]:
-    """Get groups for selected branches from customer data."""
+def fetch_groups_for_branches_dynamic(branch_ids: List[int], direct_branches: Dict[int, Dict] = None) -> List[str]:
+    """Get groups for selected branches from customer data and direct branch records."""
     if not branch_ids:
         return []
     
@@ -620,6 +620,14 @@ def fetch_groups_for_branches_dynamic(branch_ids: List[int]) -> List[str]:
         if cbid in targets:
             cgroups = _customer_groups(int(cid), cust)
             all_groups.update(cgroups)
+    
+    # Extract groups directly from branch/clinic records
+    if direct_branches:
+        for bid in targets:
+            branch = direct_branches.get(bid)
+            if isinstance(branch, dict):
+                branch_groups = _group_names_from_customer(branch)
+                all_groups.update(branch_groups)
     
     return sorted(all_groups)
 
@@ -689,10 +697,19 @@ try:
     if len(BRANCH_OPTS) > 5:
         print(f"  ... and {len(BRANCH_OPTS) - 5} more")
     
-    # Step 7: Get all available groups from customers
+    # Step 7: Extract Groups
     print(f"\nStep 7: Extract Groups")
-    ALL_GROUPS = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
-    print(f"  Found {len(ALL_GROUPS)} groups")
+    # Groups from customers
+    customer_groups = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
+    # Groups from directly-loaded branches/clinics
+    direct_branch_groups: set[str] = set()
+    for branch in DIRECT_BRANCHES.values():
+        if isinstance(branch, dict):
+            branch_groups = _group_names_from_customer(branch)
+            direct_branch_groups.update(branch_groups)
+    
+    ALL_GROUPS = sorted(customer_groups | direct_branch_groups)
+    print(f"  Found {len(ALL_GROUPS)} groups ({len(customer_groups)} from customers, {len(direct_branch_groups)} from clinics)")
     if ALL_GROUPS:
         for g in ALL_GROUPS[:3]:  # Show first 3
             print(f"  - {g}")
@@ -1120,10 +1137,10 @@ def register_callbacks(app: dash.Dash):
     def sync_group_options_by_branch(selected_branches, selected_groups):
         # Get groups for selected branches (or all groups if no selection)
         if selected_branches:
-            groups = fetch_groups_for_branches_dynamic(selected_branches)
+            groups = fetch_groups_for_branches_dynamic(selected_branches, DIRECT_BRANCHES)
         else:
             # Show all available groups if no branch selected
-            groups = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
+            groups = ALL_GROUPS
         
         opts = [{"label": g.title(), "value": g} for g in groups]
         
