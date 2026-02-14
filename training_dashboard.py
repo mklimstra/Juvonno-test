@@ -949,10 +949,23 @@ def fetch_branch_appts(branch=1) -> List[Dict]:
 def fetch_all_branch_appts(branch_ids: List[int]) -> List[Dict]:
     all_appts: List[Dict] = []
     targets = branch_ids or [1]
+    # Limit to branches that have customers (to avoid unnecessary API calls)
+    targets = [b for b in targets if b in BRANCH_TO_CUSTOMER_IDS]
+    if not targets:
+        print("  (No branches with customers; skipping appointments fetch)")
+        return []
+    
+    print(f"  Fetching appointments for {len(targets)} branches with customers...")
     for bid in targets:
         try:
-            all_appts.extend(fetch_branch_appts(int(bid)))
-        except requests.HTTPError:
+            appts = fetch_branch_appts(int(bid))
+            all_appts.extend(appts)
+            print(f"    Branch {bid}: {len(appts)} appointments")
+        except requests.HTTPError as e:
+            print(f"    Branch {bid}: Error {e.response.status_code}")
+            continue
+        except Exception as e:
+            print(f"    Branch {bid}: Error {e}")
             continue
     return all_appts
 
@@ -960,7 +973,10 @@ BRANCH_APPTS: List[Dict] = []
 CID_TO_APPTS: Dict[int, List[Dict]] = {}
 
 try:
-    BRANCH_APPTS     = fetch_all_branch_appts(BRANCH_IDS)
+    print("\nLoading appointments for all branches...")
+    BRANCH_APPTS = fetch_all_branch_appts(BRANCH_IDS)
+    print(f"  Loaded {len(BRANCH_APPTS)} total appointments")
+    
     for ap in BRANCH_APPTS:
         cust = ap.get("customer", {})
         if isinstance(cust, dict) and cust.get("id"):
@@ -972,9 +988,8 @@ try:
                     CID_TO_BRANCH[cid] = ap_branch
 except Exception as e:
     print(f"WARNING: Failed to fetch appointments during initialization: {e}")
-    import traceback
-    traceback.print_exc()
-    # Continue with empty appointments
+    print("  Continuing without appointments (will lazy-load on demand)")
+    # Continue with empty appointments - they can be fetched on demand
 
 if not BRANCH_IDS:
     BRANCH_IDS = sorted({b for b in CID_TO_BRANCH.values() if b is not None})
