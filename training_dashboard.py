@@ -50,6 +50,29 @@ def _extract_rows(payload):
             return block
     return []
 
+def _extract_total(payload) -> Optional[int]:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("count", "total", "total_count", "recordsTotal"):
+        val = payload.get(key)
+        try:
+            if val is not None:
+                return int(val)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+def _extract_has_more(payload) -> Optional[bool]:
+    if not isinstance(payload, dict):
+        return None
+    if isinstance(payload.get("next"), str):
+        return bool(payload.get("next"))
+    if isinstance(payload.get("has_more"), bool):
+        return payload.get("has_more")
+    if isinstance(payload.get("hasNext"), bool):
+        return payload.get("hasNext")
+    return None
+
 def _first_non_empty(*vals):
     for val in vals:
         if isinstance(val, str) and val.strip():
@@ -59,10 +82,19 @@ def _first_non_empty(*vals):
 def _branch_id_from_obj(obj: Dict) -> Optional[int]:
     if not isinstance(obj, dict):
         return None
-    candidates = [obj.get("branch_id"), obj.get("branchId")]
+    candidates = [
+        obj.get("branch_id"), obj.get("branchId"), obj.get("clinic_id"),
+        obj.get("location_id"), obj.get("site_id")
+    ]
     branch_obj = obj.get("branch")
     if isinstance(branch_obj, dict):
         candidates.extend([branch_obj.get("id"), branch_obj.get("branch_id")])
+    clinic_obj = obj.get("clinic")
+    if isinstance(clinic_obj, dict):
+        candidates.extend([clinic_obj.get("id"), clinic_obj.get("clinic_id")])
+    location_obj = obj.get("location")
+    if isinstance(location_obj, dict):
+        candidates.extend([location_obj.get("id"), location_obj.get("location_id")])
     for value in candidates:
         try:
             if value is None or value == "":
@@ -74,12 +106,15 @@ def _branch_id_from_obj(obj: Dict) -> Optional[int]:
 
 def _group_names_from_customer(cust: Dict) -> List[str]:
     names: List[str] = []
-    for src_key in ("groups", "group", "customer_groups", "tags"):
+    for src_key in ("groups", "group", "customer_groups", "patient_groups", "tags"):
         src = cust.get(src_key)
         if isinstance(src, list):
             for it in src:
                 if isinstance(it, str):
-                    names.append(_norm(it))
+                    for token in re.split(r"[,;|]", it):
+                        token_n = _norm(token)
+                        if token_n:
+                            names.append(token_n)
                 elif isinstance(it, dict):
                     raw = _first_non_empty(
                         it.get("name"), it.get("label"), it.get("title"), it.get("group_name")
@@ -91,8 +126,85 @@ def _group_names_from_customer(cust: Dict) -> List[str]:
             if raw:
                 names.append(_norm(raw))
         elif isinstance(src, str):
-            names.append(_norm(src))
+            for token in re.split(r"[,;|]", src):
+                token_n = _norm(token)
+                if token_n:
+                    names.append(token_n)
     return sorted({n for n in names if n})
+
+def _fetch_all_rows(endpoint: str, base_params: Dict, page_size: int = 100, max_pages: int = 500) -> List[Dict]:
+    rows_out: List[Dict] = []
+    seen_ids: set[int] = set()
+
+    for page_index in range(max_pages):
+        params = dict(base_params)
+        params.update({
+            "page": page_index + 1,
+            "count": page_size,
+            "limit": page_size,
+            "offset": page_index * page_size,
+        })
+        js = _get(endpoint, **params)
+        rows = [row for row in _extract_rows(js) if isinstance(row, dict)]
+        if not rows:
+            break
+
+        new_added = 0
+        for row in rows:
+            rid = row.get("id")
+            try:
+                rid_int = int(rid)
+            except (TypeError, ValueError):
+                rid_int = None
+
+            if rid_int is None:
+                rows_out.append(row)
+                new_added += 1
+                continue
+
+            if rid_int in seen_ids:
+                continue
+            seen_ids.add(rid_int)
+            rows_out.append(row)
+            new_added += 1
+
+        total = _extract_total(js)
+        has_more = _extract_has_more(js)
+        if total is not None and len(seen_ids) >= total:
+            break
+        if has_more is False:
+            break
+        if new_added == 0 or len(rows) < page_size:
+            break
+
+    return rows_out
+
+def _customer_detail_safe(customer_id: int) -> Dict:
+    try:
+        js = _get(f"customers/{int(customer_id)}", include="full")
+        if isinstance(js, dict):
+            return js.get("customer", js)
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code in (400, 401, 403, 404):
+            return {}
+        raise
+    except Exception:
+        return {}
+    return {}
+
+def enrich_customers(customers: Dict[int, Dict]) -> Dict[int, Dict]:
+    out: Dict[int, Dict] = {}
+    for cid, customer in customers.items():
+        base = dict(customer or {})
+        needs_detail = (_branch_id_from_obj(base) is None) or (not _group_names_from_customer(base))
+        if needs_detail:
+            detail = _customer_detail_safe(int(cid))
+            if isinstance(detail, dict) and detail:
+                merged = dict(detail)
+                merged.update(base)
+                base = merged
+        out[int(cid)] = base
+    return out
 
 # ────────── SQLite (kept for DB existence; not used here) ──────────
 DB_PATH = os.path.join(os.path.dirname(__file__), "comments.db")
@@ -135,36 +247,23 @@ def _norm(s: str) -> str:
 def fetch_customers_full() -> Dict[int, Dict]:
     out: List[Dict] = []
     attempts = [
+        ("customers/list", {"include": "groups"}),
+        ("customers", {"include": "groups"}),
+        ("customers/list", {}),
+        ("customers", {}),
         ("customers/list", {"include": "groups", "status": "ACTIVE"}),
         ("customers", {"include": "groups", "status": "ACTIVE"}),
-        ("customers", {"status": "ACTIVE"}),
     ]
 
     for endpoint, base_params in attempts:
         collected: List[Dict] = []
-        page = 1
-        while True:
-            params = dict(base_params)
-            params.update({"page": page, "count": 100, "limit": 100})
-            try:
-                js = _get(endpoint, **params)
-            except requests.HTTPError as exc:
-                if exc.response is not None and exc.response.status_code in (400, 401, 403, 404):
-                    collected = []
-                    break
+        try:
+            collected = _fetch_all_rows(endpoint, base_params, page_size=100)
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code in (400, 401, 403, 404):
+                collected = []
+            else:
                 raise
-
-            rows = _extract_rows(js)
-            if not rows:
-                if page == 1 and isinstance(js, dict) and js.get("id"):
-                    rows = [js]
-                else:
-                    break
-
-            collected.extend([row for row in rows if isinstance(row, dict)])
-            if len(rows) < 100:
-                break
-            page += 1
 
         if collected:
             out = collected
@@ -215,7 +314,7 @@ def fetch_customer_detail(customer_id: int) -> Dict:
     return {}
 
 _require_api_key()
-CUSTOMERS = fetch_customers_full()
+CUSTOMERS = enrich_customers(fetch_customers_full())
 
 def groups_of(cust: Dict) -> List[str]:
     return _group_names_from_customer(cust)
@@ -612,7 +711,7 @@ def register_callbacks(app: dash.Dash):
             and ((not branch_targets) or (CID_TO_BRANCH.get(cid) in branch_targets))
         ]
         if not matching:
-            return html.Div("No patients in those groups."), "", False
+            return html.Div("No patients match the selected branch/group filters."), "", False
         selector = dcc.Dropdown(
             id="cust-select",
             options=matching,
