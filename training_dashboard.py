@@ -73,7 +73,8 @@ def _extract_rows(payload):
 def _extract_total(payload) -> Optional[int]:
     if not isinstance(payload, dict):
         return None
-    for key in ("count", "total", "total_count", "recordsTotal"):
+    # Check for total FIRST (not count, which is items per page)
+    for key in ("total", "total_count", "recordsTotal", "count"):
         val = payload.get(key)
         try:
             if val is not None:
