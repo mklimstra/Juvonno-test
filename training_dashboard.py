@@ -784,19 +784,7 @@ try:
                     group_name = _norm(singular_group["name"])
                     branch_to_singular_group_field.setdefault(bid, set()).add(group_name)
     
-    branches_with_groups = 0
-    for bid in sorted(BRANCH_IDS):
-        cid_count = len(BRANCH_TO_CUSTOMER_IDS.get(bid, set()))
-        groups = sorted(branch_to_customer_groups.get(bid, set()))
-        if groups:
-            branches_with_groups += 1
-            branch_name = BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}")
-            print(f"    ✓ {branch_name}: {cid_count} customers → {len(groups)} groups")
-    
-    if branches_with_groups == len(BRANCH_IDS):
-        print(f"\n  🎉 SUCCESS! All {len(BRANCH_IDS)} branches have groups!")
-    else:
-        print(f"\n  {branches_with_groups}/{len(BRANCH_IDS)} branches have groups")
+    # NOTE: Debug output moved to after Step 6 where BRANCH_IDS is populated
     
     print(f"\nStep 5: Extract Branch Names")
     BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
@@ -813,6 +801,22 @@ try:
     print(f"\nStep 6: Get All Branch IDs")
     BRANCH_IDS = fetch_available_branches(CUSTOMERS, DIRECT_BRANCHES)
     print(f"  Total: {len(BRANCH_IDS)}")
+    
+    # DEBUG: Show distribution of groups across branches (now that BRANCH_IDS is populated)
+    print(f"\n  DEBUG: Customer groups by branch:")
+    branches_with_groups = 0
+    for bid in sorted(BRANCH_IDS):
+        cid_count = len(BRANCH_TO_CUSTOMER_IDS.get(bid, set()))
+        groups = sorted(branch_to_customer_groups.get(bid, set()))
+        if groups:
+            branches_with_groups += 1
+            branch_name = BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}")
+            print(f"    ✓ {branch_name}: {cid_count} customers → {len(groups)} groups")
+    
+    if branches_with_groups == len(BRANCH_IDS):
+        print(f"\n  🎉 SUCCESS! All {len(BRANCH_IDS)} branches have groups!")
+    else:
+        print(f"\n  {branches_with_groups}/{len(BRANCH_IDS)} branches have groups")
     
     print(f"\nStep 7: Create Branch Options")
     BRANCH_OPTS = sorted(
