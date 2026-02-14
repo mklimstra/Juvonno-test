@@ -459,6 +459,16 @@ def groups_of(cust: Dict) -> List[str]:
 
 CID_TO_GROUPS  = {cid: groups_of(c) for cid, c in CUSTOMERS.items()}
 CID_TO_BRANCH  = {cid: _branch_id_from_obj(c) for cid, c in CUSTOMERS.items()}
+BRANCH_TO_CUSTOMER_IDS: Dict[int, set[int]] = {}
+for cid, bid in CID_TO_BRANCH.items():
+    if bid is not None:
+        BRANCH_TO_CUSTOMER_IDS.setdefault(int(bid), set()).add(int(cid))
+
+BRANCH_TO_GROUPS = {
+    bid: sorted({g for cid in cids for g in CID_TO_GROUPS.get(cid, [])})
+    for bid, cids in BRANCH_TO_CUSTOMER_IDS.items()
+}
+
 BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
 BRANCH_IDS     = sorted(set(fetch_available_branches(CUSTOMERS)) | set(BRANCH_NAME_BY_ID.keys()))
 BRANCH_OPTS    = sorted(
@@ -877,9 +887,8 @@ def register_callbacks(app: dash.Dash):
             return GROUP_OPTS, selected_groups
 
         allowed_groups: set[str] = set()
-        for cid in CUSTOMERS.keys():
-            if CID_TO_BRANCH.get(cid) in branch_targets:
-                allowed_groups.update(CID_TO_GROUPS.get(cid, []))
+        for bid in branch_targets:
+            allowed_groups.update(BRANCH_TO_GROUPS.get(int(bid), []))
 
         opts = [{"label": g.title(), "value": g} for g in sorted(allowed_groups)]
         selected_groups_norm = [_norm(g) for g in (selected_groups or [])]
