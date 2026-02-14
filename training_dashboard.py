@@ -530,13 +530,70 @@ def groups_for_branches(branch_values) -> List[str]:
 
     return sorted(all_groups)
 
+def fetch_groups_for_branches_dynamic(branch_ids: List[int]) -> List[str]:
+    """Dynamic fetch of groups for selected branches, hitting API if needed."""
+    if not branch_ids:
+        return []
+    
+    all_groups: set[str] = set()
+    targets = {int(b) for b in branch_ids}
+    
+    # First try cached data from customers
+    for cid, cust in CUSTOMERS.items():
+        cbid = _customer_branch(int(cid), cust)
+        if cbid in targets:
+            cgroups = _customer_groups(int(cid), cust)
+            all_groups.update(cgroups)
+    
+    # Additionally, try to fetch groups from clinic/branch endpoints
+    for bid in targets:
+        try:
+            # Try clinic endpoint
+            try:
+                js = _get(f"clinics/{bid}", include="groups")
+                if isinstance(js, dict):
+                    clinic_obj = js.get("clinic", js)
+                    if isinstance(clinic_obj, dict):
+                        grps = _group_names_from_customer(clinic_obj)
+                        all_groups.update(grps)
+            except requests.HTTPError:
+                pass
+            
+            # Try branch endpoint
+            try:
+                js = _get(f"branches/{bid}", include="groups")
+                if isinstance(js, dict):
+                    branch_obj = js.get("branch", js)
+                    if isinstance(branch_obj, dict):
+                        grps = _group_names_from_customer(branch_obj)
+                        all_groups.update(grps)
+            except requests.HTTPError:
+                pass
+            
+            # Try location endpoint
+            try:
+                js = _get(f"locations/{bid}", include="groups")
+                if isinstance(js, dict):
+                    location_obj = js.get("location", js)
+                    if isinstance(location_obj, dict):
+                        grps = _group_names_from_customer(location_obj)
+                        all_groups.update(grps)
+            except requests.HTTPError:
+                pass
+        except Exception:
+            pass
+    
+    return sorted(all_groups)
+
+
 BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
 BRANCH_IDS     = sorted(set(fetch_available_branches(CUSTOMERS)) | set(BRANCH_NAME_BY_ID.keys()))
 BRANCH_OPTS    = sorted(
     [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS],
     key=lambda o: (str(o.get("label", "")).casefold(), int(o.get("value", 0)))
 )
-ALL_GROUPS     = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
+# Get all groups from all branches (used for initial display)
+ALL_GROUPS     = sorted(fetch_groups_for_branches_dynamic(BRANCH_IDS) or {g for lst in CID_TO_GROUPS.values() for g in lst})
 GROUP_OPTS     = [{"label": g.title(), "value": g} for g in ALL_GROUPS]
 
 # ────────── Appointments (all known branches) ──────────
@@ -942,7 +999,8 @@ def register_callbacks(app: dash.Dash):
         State("grp", "value"),
     )
     def sync_group_options_by_branch(selected_branches, selected_groups):
-        groups = groups_for_branches(selected_branches)
+        # Use dynamic fetching to get groups for selected branches
+        groups = fetch_groups_for_branches_dynamic(selected_branches or [])
         opts = [{"label": g.title(), "value": g} for g in groups]
         selected_groups_norm = [_norm(g) for g in (selected_groups or [])]
         allowed_set = {o["value"] for o in opts}
