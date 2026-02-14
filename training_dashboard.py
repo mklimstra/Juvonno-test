@@ -149,7 +149,7 @@ def fetch_customers_full() -> Dict[int, Dict]:
             try:
                 js = _get(endpoint, **params)
             except requests.HTTPError as exc:
-                if exc.response is not None and exc.response.status_code in (400, 404):
+                if exc.response is not None and exc.response.status_code in (400, 401, 403, 404):
                     collected = []
                     break
                 raise
@@ -181,7 +181,7 @@ def fetch_available_branches(customers: Dict[int, Dict]) -> List[int]:
             try:
                 js = _get(endpoint, page=page, count=100, limit=100)
             except requests.HTTPError as exc:
-                if exc.response is not None and exc.response.status_code in (400, 404):
+                if exc.response is not None and exc.response.status_code in (400, 401, 403, 404):
                     break
                 raise
 
