@@ -725,6 +725,16 @@ try:
     print(f"\nStep 3: Load Groups from Dedicated Endpoints")
     ALL_GROUPS_BY_ID, BRANCH_TO_GROUP_IDS = fetch_groups_and_branch_assignments()
     
+    # DEBUG: Show which branches are referenced in group records
+    if BRANCH_TO_GROUP_IDS:
+        print(f"  Group endpoint references these branches:")
+        for bid in sorted(BRANCH_TO_GROUP_IDS.keys()):
+            gids = BRANCH_TO_GROUP_IDS[bid]
+            group_names = [ALL_GROUPS_BY_ID.get(gid, {}).get("name", f"#{gid}") for gid in sorted(gids)]
+            print(f"    Branch {bid}: {len(gids)} groups {group_names[:2]}")
+    else:
+        print(f"  WARNING: No branch-to-group associations found in dedicated group endpoint!")
+    
     print(f"\nStep 4: Extract Group Mappings from Customers")
     def groups_of(cust: Dict) -> List[str]:
         return _group_names_from_customer(cust)
@@ -736,9 +746,35 @@ try:
     print(f"  Customers with branch info: {customers_with_branch}")
     print(f"  Customers with groups: {customers_with_groups}")
     
+    # DEBUG: Show distribution of groups across branches from customers
+    print(f"\n  DEBUG: Customer groups by branch:")
+    branch_to_customer_groups: Dict[int, set[str]] = {}
+    branch_to_singular_group_field: Dict[int, set[str]] = {}  # Track singular "group" fields
+    
     for cid, bid in CID_TO_BRANCH.items():
         if bid is not None:
             BRANCH_TO_CUSTOMER_IDS.setdefault(int(bid), set()).add(int(cid))
+            groups = CID_TO_GROUPS.get(cid, [])
+            branch_to_customer_groups.setdefault(bid, set()).update(groups)
+            
+            # Also track singular "group" field directly
+            cust = CUSTOMERS.get(cid, {})
+            if isinstance(cust, dict):
+                singular_group = cust.get("group")
+                if isinstance(singular_group, dict) and singular_group.get("name"):
+                    group_name = _norm(singular_group["name"])
+                    branch_to_singular_group_field.setdefault(bid, set()).add(group_name)
+    
+    for bid in sorted(BRANCH_IDS):
+        cid_count = len(BRANCH_TO_CUSTOMER_IDS.get(bid, set()))
+        groups = sorted(branch_to_customer_groups.get(bid, set()))
+        singular_groups = sorted(branch_to_singular_group_field.get(bid, set()))
+        status = "✓" if groups else "✗"
+        print(f"    {status} Branch {bid}: {cid_count} customers")
+        if groups:
+            print(f"       extracted groups: {groups[:3]} ({len(groups)} total)")
+        if singular_groups != groups:
+            print(f"       singular 'group' field: {singular_groups}")
     
     print(f"\nStep 5: Extract Branch Names")
     BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
@@ -784,6 +820,7 @@ try:
     BRANCH_TO_GROUPS = {}
     branches_with_groups = 0
     branches_without_groups = 0
+    branches_without_groups_list: List[Tuple[int, str]] = []
     
     for bid in BRANCH_IDS:
         bid_groups: set[str] = set()
@@ -821,17 +858,25 @@ try:
         
         BRANCH_TO_GROUPS[bid] = sorted(bid_groups)
         
+        branch_name = BRANCH_NAME_BY_ID.get(bid, f"(ID {bid})")
         if bid_groups:
             branches_with_groups += 1
-            branch_name = BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}")
-            print(f"    Branch {bid} ({branch_name}): {len(bid_groups)} groups [{', '.join(source_info)}]")
+            print(f"    ✓ {branch_name}: {len(bid_groups)} groups [{', '.join(source_info)}]")
         else:
             branches_without_groups += 1
-            branch_name = BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}")
-            print(f"    Branch {bid} ({branch_name}): NO GROUPS")
+            branches_without_groups_list.append((bid, branch_name))
+            print(f"    ✗ {branch_name}: NO GROUPS")
+    
+    if branches_without_groups_list:
+        print(f"\n  Branches with NO groups ({branches_without_groups} total):")
+        for bid, name in branches_without_groups_list:
+            cust_count = len(BRANCH_TO_CUSTOMER_IDS.get(bid, set()))
+            has_direct_record = "yes" if bid in DIRECT_BRANCHES else "no"
+            has_group_mapping = "yes" if bid in BRANCH_TO_GROUP_IDS else "no"
+            print(f"    - {name}: {cust_count} customers, direct_branch={has_direct_record}, group_mapping={has_group_mapping}")
     
     ALL_GROUPS = sorted(customer_groups | direct_branch_groups | dedicated_group_names)
-    print(f"\n  Summary: {len(ALL_GROUPS)} total groups across {branches_with_groups} branches")
+    print(f"\n  Summary: {len(ALL_GROUPS)} total groups across {branches_with_groups} branches with groups")
     print(f"    - {len(customer_groups)} from customers")
     print(f"    - {len(direct_branch_groups)} from clinic records")
     print(f"    - {len(dedicated_group_names)} from dedicated group records")
