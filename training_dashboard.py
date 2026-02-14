@@ -92,7 +92,6 @@ def _branch_id_from_obj(obj: Dict) -> Optional[int]:
     if not isinstance(obj, dict):
         return None
     candidates = [
-        obj.get("id"),
         obj.get("branch_id"), obj.get("branchId"), obj.get("clinic_id"),
         obj.get("location_id"), obj.get("site_id")
     ]
@@ -112,6 +111,22 @@ def _branch_id_from_obj(obj: Dict) -> Optional[int]:
             return int(value)
         except (TypeError, ValueError):
             continue
+    return None
+
+def _branch_id_from_branch_row(obj: Dict) -> Optional[int]:
+    if not isinstance(obj, dict):
+        return None
+
+    bid = _branch_id_from_obj(obj)
+    if bid is not None:
+        return bid
+
+    try:
+        val = obj.get("id")
+        if val is not None and val != "":
+            return int(val)
+    except (TypeError, ValueError):
+        pass
     return None
 
 def _branch_name_from_obj(obj: Dict) -> str:
@@ -146,6 +161,29 @@ def _branch_name_from_obj(obj: Dict) -> str:
                 candidates.append(val.strip())
 
     return candidates[0] if candidates else ""
+
+def _branch_name_from_customer_obj(obj: Dict) -> str:
+    if not isinstance(obj, dict):
+        return ""
+
+    for container_key, keys in (
+        ("branch", ("name", "branch_name", "title", "label", "code")),
+        ("clinic", ("name", "clinic_name", "title", "label", "code")),
+        ("location", ("name", "location_name", "title", "label", "code")),
+    ):
+        container = obj.get(container_key)
+        if isinstance(container, dict):
+            for key in keys:
+                val = container.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+
+    for key in ("branch_name", "clinic_name", "location_name", "site_name"):
+        val = obj.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+
+    return ""
 
 def _group_names_from_customer(cust: Dict) -> List[str]:
     names: List[str] = []
@@ -331,7 +369,7 @@ def fetch_available_branches(customers: Dict[int, Dict]) -> List[int]:
             if not rows:
                 break
             for row in rows:
-                bid = _branch_id_from_obj(row)
+                bid = _branch_id_from_branch_row(row)
                 if bid is not None:
                     branch_ids.add(bid)
             if len(rows) < 100:
@@ -350,7 +388,7 @@ def fetch_branch_name_map(customers: Dict[int, Dict]) -> Dict[int, str]:
 
     for customer in customers.values():
         bid = _branch_id_from_obj(customer)
-        bname = _branch_name_from_obj(customer)
+        bname = _branch_name_from_customer_obj(customer)
         if bid is not None and bname:
             names[bid] = bname
 
@@ -371,7 +409,7 @@ def fetch_branch_name_map(customers: Dict[int, Dict]) -> Dict[int, str]:
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                bid = _branch_id_from_obj(row)
+                bid = _branch_id_from_branch_row(row)
                 bname = _branch_name_from_obj(row)
                 if bid is not None and bname:
                     names[bid] = bname
@@ -403,7 +441,10 @@ CID_TO_GROUPS  = {cid: groups_of(c) for cid, c in CUSTOMERS.items()}
 CID_TO_BRANCH  = {cid: _branch_id_from_obj(c) for cid, c in CUSTOMERS.items()}
 BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
 BRANCH_IDS     = sorted(set(fetch_available_branches(CUSTOMERS)) | set(BRANCH_NAME_BY_ID.keys()))
-BRANCH_OPTS    = [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS]
+BRANCH_OPTS    = sorted(
+    [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS],
+    key=lambda o: (str(o.get("label", "")).casefold(), int(o.get("value", 0)))
+)
 ALL_GROUPS     = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
 GROUP_OPTS     = [{"label": g.title(), "value": g} for g in ALL_GROUPS]
 
@@ -443,7 +484,10 @@ for ap in BRANCH_APPTS:
 
 if not BRANCH_IDS:
     BRANCH_IDS = sorted({b for b in CID_TO_BRANCH.values() if b is not None})
-    BRANCH_OPTS = [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS]
+    BRANCH_OPTS = sorted(
+        [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS],
+        key=lambda o: (str(o.get("label", "")).casefold(), int(o.get("value", 0)))
+    )
 
 # ────────── Encounters / Training Status ──────────
 FLAGS = [{}, {"include": "fields"}, {"include": "answers"}, {"full": 1}]
@@ -483,6 +527,35 @@ def extract_training_status(enc_payload: Union[Dict, List]) -> str:
         elif isinstance(node, list):
             stack.extend(node)
     return ""
+
+def _encounter_sort_dt(enc: Dict) -> pd.Timestamp:
+    if not isinstance(enc, dict):
+        return pd.Timestamp.min
+    for key in ("date", "encounter_date", "modification_date", "modified_at", "creation_date", "created_at"):
+        raw = enc.get(key)
+        if raw:
+            ts = pd.to_datetime(raw, errors="coerce")
+            if not pd.isna(ts):
+                return ts
+    return pd.Timestamp.min
+
+def latest_training_status_for_appt(aid: int) -> str:
+    eids = encounter_ids_for_appt(aid)
+    if not eids:
+        return ""
+
+    candidates: List[Tuple[pd.Timestamp, int, str]] = []
+    for eid in set(int(x) for x in eids):
+        enc = fetch_encounter(eid)
+        status = extract_training_status(enc)
+        if not status:
+            continue
+        candidates.append((_encounter_sort_dt(enc), int(eid), status))
+
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return candidates[0][2]
 
 @functools.lru_cache(maxsize=2048)
 def encounter_ids_for_appt(aid: int) -> List[int]:
@@ -771,6 +844,29 @@ def register_callbacks(app: dash.Dash):
     def toggle_table(n, is_open):
         new = _toggle(is_open); return new, _sym(new), _hdr_style(new)
 
+    @app.callback(
+        Output("grp", "options"),
+        Output("grp", "value"),
+        Input("branch", "value"),
+        State("grp", "value"),
+    )
+    def sync_group_options_by_branch(selected_branches, selected_groups):
+        branch_targets = {int(v) for v in (selected_branches or [])}
+
+        if not branch_targets:
+            return GROUP_OPTS, selected_groups
+
+        allowed_groups: set[str] = set()
+        for cid in CUSTOMERS.keys():
+            if CID_TO_BRANCH.get(cid) in branch_targets:
+                allowed_groups.update(CID_TO_GROUPS.get(cid, []))
+
+        opts = [{"label": g.title(), "value": g} for g in sorted(allowed_groups)]
+        selected_groups_norm = [_norm(g) for g in (selected_groups or [])]
+        allowed_set = {o["value"] for o in opts}
+        pruned_selected = [g for g in selected_groups_norm if g in allowed_set]
+        return opts, pruned_selected
+
     # ① Load groups → Athlete selector
     @app.callback(
         Output("customer-checklist-container", "children"),
@@ -874,9 +970,7 @@ def register_callbacks(app: dash.Dash):
             for ap in CID_TO_APPTS.get(cid, []):
                 aid = ap.get("id")
                 date_str = tidy_date_str(ap.get("date"))
-                eids = encounter_ids_for_appt(aid)
-                max_eid = max(eids) if eids else None
-                status = extract_training_status(fetch_encounter(max_eid)) if max_eid else ""
+                status = latest_training_status_for_appt(int(aid)) if aid else ""
 
                 names: List[str] = []
                 for rec in list_complaints_for_appt(aid):
@@ -1052,9 +1146,7 @@ def register_callbacks(app: dash.Dash):
             date_str = tidy_date_str(ap.get("date"))
             dt = pd.to_datetime(date_str, errors="coerce")
             if pd.isna(dt): continue
-            eids = encounter_ids_for_appt(aid)
-            max_eid = max(eids) if eids else None
-            s = extract_training_status(fetch_encounter(max_eid)) if max_eid else ""
+            s = latest_training_status_for_appt(int(aid)) if aid else ""
             if s: status_rows.append((dt.normalize(), s))
         current_status = ""
         if status_rows:
