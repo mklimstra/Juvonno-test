@@ -972,24 +972,27 @@ def fetch_all_branch_appts(branch_ids: List[int]) -> List[Dict]:
 BRANCH_APPTS: List[Dict] = []
 CID_TO_APPTS: Dict[int, List[Dict]] = {}
 
-try:
-    print("\nLoading appointments for all branches...")
-    BRANCH_APPTS = fetch_all_branch_appts(BRANCH_IDS)
-    print(f"  Loaded {len(BRANCH_APPTS)} total appointments")
-    
-    for ap in BRANCH_APPTS:
-        cust = ap.get("customer", {})
-        if isinstance(cust, dict) and cust.get("id"):
-            cid = int(cust["id"])
-            CID_TO_APPTS.setdefault(cid, []).append(ap)
-            if CID_TO_BRANCH.get(cid) is None:
-                ap_branch = _branch_id_from_obj(ap)
-                if ap_branch is not None:
-                    CID_TO_BRANCH[cid] = ap_branch
-except Exception as e:
-    print(f"WARNING: Failed to fetch appointments during initialization: {e}")
-    print("  Continuing without appointments (will lazy-load on demand)")
-    # Continue with empty appointments - they can be fetched on demand
+# NOTE: Appointments are now lazy-loaded on-demand when a user selects a branch
+# Skipping pre-loading during init to avoid timeout
+print("\nLoading appointments (skipped for now - will lazy-load on demand)")
+# try:
+#     print("\nLoading appointments for all branches...")
+#     BRANCH_APPTS = fetch_all_branch_appts(BRANCH_IDS)
+#     print(f"  Loaded {len(BRANCH_APPTS)} total appointments")
+#     
+#     for ap in BRANCH_APPTS:
+#         cust = ap.get("customer", {})
+#         if isinstance(cust, dict) and cust.get("id"):
+#             cid = int(cust["id"])
+#             CID_TO_APPTS.setdefault(cid, []).append(ap)
+#             if CID_TO_BRANCH.get(cid) is None:
+#                 ap_branch = _branch_id_from_obj(ap)
+#                 if ap_branch is not None:
+#                    CID_TO_BRANCH[cid] = ap_branch
+# except Exception as e:
+#     print(f"WARNING: Failed to fetch appointments during initialization: {e}")
+#     print("  Continuing without appointments (will lazy-load on demand)")
+#     # Continue with empty appointments - they can be fetched on demand
 
 if not BRANCH_IDS:
     BRANCH_IDS = sorted({b for b in CID_TO_BRANCH.values() if b is not None})
