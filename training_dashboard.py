@@ -246,13 +246,13 @@ def _group_names_from_customer(cust: Dict) -> List[str]:
                     if token_n:
                         names.append(token_n)
     
-    group_keys = ("groups", "group", "customer_groups", "patient_groups", "tags")
+    group_keys = ("groups", "group", "customer_groups", "patient_groups", "tags", "memberships", "member_groups", "assignments")
     
     # Extract from top-level first
     _extract_from_container(cust, group_keys)
     
     # Extract from nested clinic/location/branch containers (clinic-aware)
-    for container_key in ("clinic", "location", "branch"):
+    for container_key in ("clinic", "location", "branch", "site"):
         container = cust.get(container_key)
         if isinstance(container, dict):
             _extract_from_container(container, group_keys)
@@ -708,8 +708,25 @@ try:
             branch_groups = _group_names_from_customer(branch)
             direct_branch_groups.update(branch_groups)
     
+    # Build branch-to-groups map including both customer assignments AND clinic definitions
+    BRANCH_TO_GROUPS = {}
+    for bid in BRANCH_IDS:
+        bid_groups: set[str] = set()
+        
+        # Add groups from customers in this branch
+        for cid, cust_branch in CID_TO_BRANCH.items():
+            if cust_branch == bid:
+                bid_groups.update(CID_TO_GROUPS.get(cid, []))
+        
+        # Add groups from the clinic record itself
+        if bid in DIRECT_BRANCHES:
+            clinic_groups = _group_names_from_customer(DIRECT_BRANCHES[bid])
+            bid_groups.update(clinic_groups)
+        
+        BRANCH_TO_GROUPS[bid] = sorted(bid_groups)
+    
     ALL_GROUPS = sorted(customer_groups | direct_branch_groups)
-    print(f"  Found {len(ALL_GROUPS)} groups ({len(customer_groups)} from customers, {len(direct_branch_groups)} from clinics)")
+    print(f"  Found {len(ALL_GROUPS)} total groups ({len(customer_groups)} from customers, {len(direct_branch_groups)} from clinics)")
     if ALL_GROUPS:
         for g in ALL_GROUPS[:3]:  # Show first 3
             print(f"  - {g}")
@@ -1137,7 +1154,9 @@ def register_callbacks(app: dash.Dash):
     def sync_group_options_by_branch(selected_branches, selected_groups):
         # Get groups for selected branches (or all groups if no selection)
         if selected_branches:
-            groups = fetch_groups_for_branches_dynamic(selected_branches, DIRECT_BRANCHES)
+            # Combine groups from all selected branches
+            branch_group_sets = [BRANCH_TO_GROUPS.get(int(bid), set()) for bid in selected_branches]
+            groups = sorted(set().union(*branch_group_sets))
         else:
             # Show all available groups if no branch selected
             groups = ALL_GROUPS
