@@ -463,6 +463,59 @@ def fetch_branches_and_clinics_direct() -> Dict[int, Dict]:
     print(f"Total branches/clinics loaded directly: {len(all_branches)}")
     return all_branches
 
+def fetch_groups_and_branch_assignments() -> Tuple[Dict[int, Dict], Dict[int, set[int]]]:
+    """
+    Load all groups and their branch assignments.
+    Returns: (groups_by_id, branch_to_group_ids)
+    """
+    all_groups: Dict[int, Dict] = {}
+    branch_to_group_ids: Dict[int, set[int]] = {}
+    
+    groups_endpoints = [
+        ("groups/list", {}),
+        ("groups", {}),
+        ("patient_groups/list", {}),
+        ("patient_groups", {}),
+    ]
+    
+    for endpoint, base_params in groups_endpoints:
+        try:
+            collected = _fetch_all_rows(endpoint, base_params, page_size=100, max_pages=500)
+            if collected:
+                count_before = len(all_groups)
+                for g in collected:
+                    if isinstance(g, dict) and g.get("id") is not None:
+                        gid = int(g["id"])
+                        if gid not in all_groups:
+                            all_groups[gid] = dict(g)
+                        else:
+                            _deep_merge(all_groups[gid], g)
+                        
+                        # Extract branch associations from group record
+                        for branch_key in ("branch", "branch_id", "branchId", "clinic", "clinic_id", "clinicId", "location", "location_id"):
+                            branch_val = g.get(branch_key)
+                            if branch_val is not None:
+                                try:
+                                    bid = int(branch_val) if not isinstance(branch_val, dict) else int(branch_val.get("id", 0))
+                                    if bid > 0:
+                                        branch_to_group_ids.setdefault(bid, set()).add(gid)
+                                except (TypeError, ValueError):
+                                    pass
+                
+                newly_added = len(all_groups) - count_before
+                if newly_added > 0:
+                    print(f"  {endpoint}: +{newly_added} groups")
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code in (400, 401, 403, 404):
+                pass
+            else:
+                raise
+        except Exception as e:
+            pass
+    
+    print(f"Total groups loaded directly: {len(all_groups)}")
+    return all_groups, branch_to_group_ids
+
 def fetch_available_branches(customers: Dict[int, Dict], direct_branches: Dict[int, Dict] = None) -> List[int]:
     branch_ids: set[int] = set()
     
@@ -638,6 +691,8 @@ BRANCH_OPTS: List[Dict] = []
 ALL_GROUPS: List[str] = []
 GROUP_OPTS: List[Dict] = []
 DIRECT_BRANCHES: Dict[int, Dict] = {}
+ALL_GROUPS_BY_ID: Dict[int, Dict] = {}
+BRANCH_TO_GROUP_IDS: Dict[int, set[int]] = {}
 
 print("\n" + "="*60)
 print("INITIALIZING TRAINING DASHBOARD")
@@ -652,7 +707,10 @@ try:
     print(f"\nStep 2: Load Branches/Clinics Directly")
     DIRECT_BRANCHES = fetch_branches_and_clinics_direct()
     
-    print(f"\nStep 3: Extract Group Mappings")
+    print(f"\nStep 3: Load Groups from Dedicated Endpoints")
+    ALL_GROUPS_BY_ID, BRANCH_TO_GROUP_IDS = fetch_groups_and_branch_assignments()
+    
+    print(f"\nStep 4: Extract Group Mappings from Customers")
     def groups_of(cust: Dict) -> List[str]:
         return _group_names_from_customer(cust)
     
@@ -665,12 +723,7 @@ try:
         if bid is not None:
             BRANCH_TO_CUSTOMER_IDS.setdefault(int(bid), set()).add(int(cid))
     
-    BRANCH_TO_GROUPS = {
-        bid: sorted({g for cid in cids for g in CID_TO_GROUPS.get(cid, [])})
-        for bid, cids in BRANCH_TO_CUSTOMER_IDS.items()
-    }
-    
-    print(f"\nStep 4: Extract Branch Names")
+    print(f"\nStep 5: Extract Branch Names")
     BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
     # Add names from directly-loaded branches
     for bid, branch in DIRECT_BRANCHES.items():
@@ -682,11 +735,11 @@ try:
                     break
     print(f"  Found {len(BRANCH_NAME_BY_ID)} branch names")
     
-    print(f"\nStep 5: Get All Branch IDs")
+    print(f"\nStep 6: Get All Branch IDs")
     BRANCH_IDS = fetch_available_branches(CUSTOMERS, DIRECT_BRANCHES)
     print(f"  Total: {len(BRANCH_IDS)}")
     
-    print(f"\nStep 6: Create Branch Options")
+    print(f"\nStep 7: Create Branch Options")
     BRANCH_OPTS = sorted(
         [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS],
         key=lambda o: (str(o.get("label", "")).casefold(), int(o.get("value", 0)))
@@ -697,8 +750,8 @@ try:
     if len(BRANCH_OPTS) > 5:
         print(f"  ... and {len(BRANCH_OPTS) - 5} more")
     
-    # Step 7: Extract Groups
-    print(f"\nStep 7: Extract Groups")
+    # Step 8: Extract Groups - combine from customers + dedicated group records + branch assignments
+    print(f"\nStep 8: Extract and Map Groups")
     # Groups from customers
     customer_groups = sorted({g for lst in CID_TO_GROUPS.values() for g in lst})
     # Groups from directly-loaded branches/clinics
@@ -707,26 +760,38 @@ try:
         if isinstance(branch, dict):
             branch_groups = _group_names_from_customer(branch)
             direct_branch_groups.update(branch_groups)
+    # Groups from dedicated group records
+    dedicated_group_names = {_norm(g.get("name", "")) for g in ALL_GROUPS_BY_ID.values() if g.get("name")}
     
-    # Build branch-to-groups map including both customer assignments AND clinic definitions
+    # Build branch-to-groups map from ALL sources
     BRANCH_TO_GROUPS = {}
     for bid in BRANCH_IDS:
         bid_groups: set[str] = set()
         
-        # Add groups from customers in this branch
+        # 1) Add groups from customers in this branch
         for cid, cust_branch in CID_TO_BRANCH.items():
             if cust_branch == bid:
                 bid_groups.update(CID_TO_GROUPS.get(cid, []))
         
-        # Add groups from the clinic record itself
+        # 2) Add groups from the clinic record itself
         if bid in DIRECT_BRANCHES:
             clinic_groups = _group_names_from_customer(DIRECT_BRANCHES[bid])
             bid_groups.update(clinic_groups)
         
+        # 3) Add groups linked to this branch via group records
+        if bid in BRANCH_TO_GROUP_IDS:
+            for gid in BRANCH_TO_GROUP_IDS[bid]:
+                group_rec = ALL_GROUPS_BY_ID.get(gid, {})
+                if isinstance(group_rec, dict) and group_rec.get("name"):
+                    bid_groups.add(_norm(group_rec["name"]))
+        
         BRANCH_TO_GROUPS[bid] = sorted(bid_groups)
     
-    ALL_GROUPS = sorted(customer_groups | direct_branch_groups)
-    print(f"  Found {len(ALL_GROUPS)} total groups ({len(customer_groups)} from customers, {len(direct_branch_groups)} from clinics)")
+    ALL_GROUPS = sorted(customer_groups | direct_branch_groups | dedicated_group_names)
+    print(f"  Found {len(ALL_GROUPS)} total groups")
+    print(f"    - {len(customer_groups)} from customers")
+    print(f"    - {len(direct_branch_groups)} from clinic records")
+    print(f"    - {len(dedicated_group_names)} from dedicated group records")
     if ALL_GROUPS:
         for g in ALL_GROUPS[:3]:  # Show first 3
             print(f"  - {g}")
