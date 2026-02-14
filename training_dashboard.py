@@ -328,9 +328,8 @@ def _fetch_all_rows(endpoint: str, base_params: Dict, page_size: int = 100, max_
         if new_added == 0:
             print("(no new rows)")
             break
-        if len(rows) < page_size:
-            print("(fewer than page_size)")
-            break
+        # Don't break just because len(rows) < page_size - the API may paginate differently
+        # Only break if we explicitly know we're done via total/has_more
 
     print(f"\n      Final count: {len(rows_out)} rows")
     return rows_out
