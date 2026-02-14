@@ -26,11 +26,16 @@ HEADERS = {"accept": "application/json"}
 
 def _require_api_key():
     if not API_KEY:
-        raise RuntimeError(
-            "Missing JUV_API_KEY. Set it in your deployment environment (e.g., Posit Connect → Variables)."
-        )
+        print("WARNING: JUV_API_KEY not set. API calls will fail.")
+        # Don't raise - just warn. This allows app to start even if API key isn't ready yet.
+        return False
+    return True
 
 def _get(path: str, **params):
+    if not API_KEY:
+        raise RuntimeError(
+            "API_KEY not configured. Set JUV_API_KEY environment variable."
+        )
     request_headers = dict(HEADERS)
     if API_KEY:
         request_headers.setdefault("x-api-key", API_KEY)
@@ -471,22 +476,36 @@ def fetch_customer_detail(customer_id: int) -> Dict:
     return {}
 
 _require_api_key()
-CUSTOMERS = enrich_customers(fetch_customers_full())
 
-def groups_of(cust: Dict) -> List[str]:
-    return _group_names_from_customer(cust)
-
-CID_TO_GROUPS  = {cid: groups_of(c) for cid, c in CUSTOMERS.items()}
-CID_TO_BRANCH  = {cid: _branch_id_from_obj(c) for cid, c in CUSTOMERS.items()}
+# Initialize with error handling
+CUSTOMERS: Dict[int, Dict] = {}
+CID_TO_GROUPS: Dict[int, List[str]] = {}
+CID_TO_BRANCH: Dict[int, Optional[int]] = {}
 BRANCH_TO_CUSTOMER_IDS: Dict[int, set[int]] = {}
-for cid, bid in CID_TO_BRANCH.items():
-    if bid is not None:
-        BRANCH_TO_CUSTOMER_IDS.setdefault(int(bid), set()).add(int(cid))
+BRANCH_TO_GROUPS: Dict[int, List[str]] = {}
 
-BRANCH_TO_GROUPS = {
-    bid: sorted({g for cid in cids for g in CID_TO_GROUPS.get(cid, [])})
-    for bid, cids in BRANCH_TO_CUSTOMER_IDS.items()
-}
+try:
+    CUSTOMERS = enrich_customers(fetch_customers_full())
+    
+    def groups_of(cust: Dict) -> List[str]:
+        return _group_names_from_customer(cust)
+    
+    CID_TO_GROUPS  = {cid: groups_of(c) for cid, c in CUSTOMERS.items()}
+    CID_TO_BRANCH  = {cid: _branch_id_from_obj(c) for cid, c in CUSTOMERS.items()}
+    
+    for cid, bid in CID_TO_BRANCH.items():
+        if bid is not None:
+            BRANCH_TO_CUSTOMER_IDS.setdefault(int(bid), set()).add(int(cid))
+    
+    BRANCH_TO_GROUPS = {
+        bid: sorted({g for cid in cids for g in CID_TO_GROUPS.get(cid, [])})
+        for bid, cids in BRANCH_TO_CUSTOMER_IDS.items()
+    }
+except Exception as e:
+    print(f"WARNING: Failed to fetch customers during initialization: {e}")
+    import traceback
+    traceback.print_exc()
+    # Continue anyway with empty dicts
 
 def _customer_branch(cid: int, cust: Optional[Dict] = None) -> Optional[int]:
     bid = CID_TO_BRANCH.get(int(cid))
@@ -620,15 +639,27 @@ def fetch_groups_for_branches_dynamic(branch_ids: List[int]) -> List[str]:
     return sorted(all_groups)
 
 
-BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
-BRANCH_IDS     = sorted(set(fetch_available_branches(CUSTOMERS)) | set(BRANCH_NAME_BY_ID.keys()))
-BRANCH_OPTS    = sorted(
-    [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS],
-    key=lambda o: (str(o.get("label", "")).casefold(), int(o.get("value", 0)))
-)
-# Get all groups from all branches (used for initial display)
-ALL_GROUPS     = sorted(fetch_groups_for_branches_dynamic(BRANCH_IDS) or {g for lst in CID_TO_GROUPS.values() for g in lst})
-GROUP_OPTS     = [{"label": g.title(), "value": g} for g in ALL_GROUPS]
+BRANCH_NAME_BY_ID: Dict[int, str] = {}
+BRANCH_IDS: List[int] = []
+BRANCH_OPTS: List[Dict] = []
+ALL_GROUPS: List[str] = []
+GROUP_OPTS: List[Dict] = []
+
+try:
+    BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
+    BRANCH_IDS     = sorted(set(fetch_available_branches(CUSTOMERS)) | set(BRANCH_NAME_BY_ID.keys()))
+    BRANCH_OPTS    = sorted(
+        [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS],
+        key=lambda o: (str(o.get("label", "")).casefold(), int(o.get("value", 0)))
+    )
+    # Get all groups from all branches (used for initial display)
+    ALL_GROUPS     = sorted(fetch_groups_for_branches_dynamic(BRANCH_IDS) or {g for lst in CID_TO_GROUPS.values() for g in lst})
+    GROUP_OPTS     = [{"label": g.title(), "value": g} for g in ALL_GROUPS]
+except Exception as e:
+    print(f"WARNING: Failed to fetch branches during initialization: {e}")
+    import traceback
+    traceback.print_exc()
+    # Continue with empty branch/group data
 
 # ────────── Appointments (all known branches) ──────────
 def fetch_branch_appts(branch=1) -> List[Dict]:
@@ -652,24 +683,35 @@ def fetch_all_branch_appts(branch_ids: List[int]) -> List[Dict]:
             continue
     return all_appts
 
-BRANCH_APPTS     = fetch_all_branch_appts(BRANCH_IDS)
+BRANCH_APPTS: List[Dict] = []
 CID_TO_APPTS: Dict[int, List[Dict]] = {}
-for ap in BRANCH_APPTS:
-    cust = ap.get("customer", {})
-    if isinstance(cust, dict) and cust.get("id"):
-        cid = int(cust["id"])
-        CID_TO_APPTS.setdefault(cid, []).append(ap)
-        if CID_TO_BRANCH.get(cid) is None:
-            ap_branch = _branch_id_from_obj(ap)
-            if ap_branch is not None:
-                CID_TO_BRANCH[cid] = ap_branch
+
+try:
+    BRANCH_APPTS     = fetch_all_branch_appts(BRANCH_IDS)
+    for ap in BRANCH_APPTS:
+        cust = ap.get("customer", {})
+        if isinstance(cust, dict) and cust.get("id"):
+            cid = int(cust["id"])
+            CID_TO_APPTS.setdefault(cid, []).append(ap)
+            if CID_TO_BRANCH.get(cid) is None:
+                ap_branch = _branch_id_from_obj(ap)
+                if ap_branch is not None:
+                    CID_TO_BRANCH[cid] = ap_branch
+except Exception as e:
+    print(f"WARNING: Failed to fetch appointments during initialization: {e}")
+    import traceback
+    traceback.print_exc()
+    # Continue with empty appointments
 
 if not BRANCH_IDS:
-    BRANCH_IDS = sorted({b for b in CID_TO_BRANCH.values() if b is not None})
-    BRANCH_OPTS = sorted(
-        [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS],
-        key=lambda o: (str(o.get("label", "")).casefold(), int(o.get("value", 0)))
-    )
+    try:
+        BRANCH_IDS = sorted({b for b in CID_TO_BRANCH.values() if b is not None})
+        BRANCH_OPTS = sorted(
+            [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS],
+            key=lambda o: (str(o.get("label", "")).casefold(), int(o.get("value", 0)))
+        )
+    except Exception as e:
+        print(f"WARNING: Failed to rebuild branch options: {e}")
 
 # ────────── Encounters / Training Status ──────────
 FLAGS = [{}, {"include": "fields"}, {"include": "answers"}, {"full": 1}]
