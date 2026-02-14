@@ -196,13 +196,16 @@ def _branch_name_from_customer_obj(obj: Dict) -> str:
 
     return ""
 
-def _group_names_from_customer(cust: Dict) -> List[str]:
+def _group_names_from_customer(cust: Dict, debug: bool = False) -> List[str]:
     names: List[str] = []
     
     # Helper to extract groups from a container (clinic, location, or top-level)
-    def _extract_from_container(container: Dict, search_keys: Iterable[str]):
+    def _extract_from_container(container: Dict, search_keys: Iterable[str], location: str = ""):
         for src_key in search_keys:
             src = container.get(src_key)
+            if src is None:
+                continue
+            
             if isinstance(src, list):
                 for it in src:
                     if isinstance(it, str):
@@ -210,12 +213,16 @@ def _group_names_from_customer(cust: Dict) -> List[str]:
                             token_n = _norm(token)
                             if token_n:
                                 names.append(token_n)
+                                if debug:
+                                    print(f"      [{location}] from {src_key} list (string): {token_n}")
                     elif isinstance(it, dict):
                         raw = _first_non_empty(
                             it.get("name"), it.get("label"), it.get("title"), it.get("group_name")
                         )
                         if raw:
                             names.append(_norm(raw))
+                            if debug:
+                                print(f"      [{location}] from {src_key} list (dict): {_norm(raw)}")
                         nested_group = it.get("group")
                         if isinstance(nested_group, dict):
                             raw_nested = _first_non_empty(
@@ -226,10 +233,14 @@ def _group_names_from_customer(cust: Dict) -> List[str]:
                             )
                             if raw_nested:
                                 names.append(_norm(raw_nested))
+                                if debug:
+                                    print(f"      [{location}] from {src_key} nested.group: {_norm(raw_nested)}")
             elif isinstance(src, dict):
                 raw = _first_non_empty(src.get("name"), src.get("label"), src.get("title"), src.get("group_name"))
                 if raw:
                     names.append(_norm(raw))
+                    if debug:
+                        print(f"      [{location}] from {src_key} (dict): {_norm(raw)}")
                 nested_group = src.get("group")
                 if isinstance(nested_group, dict):
                     raw_nested = _first_non_empty(
@@ -240,22 +251,26 @@ def _group_names_from_customer(cust: Dict) -> List[str]:
                     )
                     if raw_nested:
                         names.append(_norm(raw_nested))
+                        if debug:
+                            print(f"      [{location}] from {src_key}.group: {_norm(raw_nested)}")
             elif isinstance(src, str):
                 for token in re.split(r"[,;|]", src):
                     token_n = _norm(token)
                     if token_n:
                         names.append(token_n)
+                        if debug:
+                            print(f"      [{location}] from {src_key} (string): {token_n}")
     
     group_keys = ("groups", "group", "customer_groups", "patient_groups", "tags", "memberships", "member_groups", "assignments")
     
     # Extract from top-level first
-    _extract_from_container(cust, group_keys)
+    _extract_from_container(cust, group_keys, "top-level")
     
     # Extract from nested clinic/location/branch containers (clinic-aware)
     for container_key in ("clinic", "location", "branch", "site"):
         container = cust.get(container_key)
         if isinstance(container, dict):
-            _extract_from_container(container, group_keys)
+            _extract_from_container(container, group_keys, container_key)
     
     return sorted({n for n in names if n})
 
@@ -717,7 +732,9 @@ try:
     CID_TO_GROUPS  = {cid: groups_of(c) for cid, c in CUSTOMERS.items()}
     CID_TO_BRANCH  = {cid: _branch_id_from_obj(c) for cid, c in CUSTOMERS.items()}
     customers_with_branch = len({cid for cid, bid in CID_TO_BRANCH.items() if bid is not None})
+    customers_with_groups = len({cid for cid, groups in CID_TO_GROUPS.items() if groups})
     print(f"  Customers with branch info: {customers_with_branch}")
+    print(f"  Customers with groups: {customers_with_groups}")
     
     for cid, bid in CID_TO_BRANCH.items():
         if bid is not None:
@@ -765,36 +782,63 @@ try:
     
     # Build branch-to-groups map from ALL sources
     BRANCH_TO_GROUPS = {}
+    branches_with_groups = 0
+    branches_without_groups = 0
+    
     for bid in BRANCH_IDS:
         bid_groups: set[str] = set()
+        source_info = []
         
         # 1) Add groups from customers in this branch
-        for cid, cust_branch in CID_TO_BRANCH.items():
-            if cust_branch == bid:
-                bid_groups.update(CID_TO_GROUPS.get(cid, []))
+        customers_in_branch = {cid for cid, cust_branch in CID_TO_BRANCH.items() if cust_branch == bid}
+        if customers_in_branch:
+            for cid in customers_in_branch:
+                groups_for_cid = CID_TO_GROUPS.get(cid, [])
+                if groups_for_cid:
+                    bid_groups.update(groups_for_cid)
+            if bid_groups:
+                source_info.append(f"customer({len(bid_groups)})")
         
         # 2) Add groups from the clinic record itself
         if bid in DIRECT_BRANCHES:
             clinic_groups = _group_names_from_customer(DIRECT_BRANCHES[bid])
-            bid_groups.update(clinic_groups)
+            if clinic_groups:
+                bid_groups.update(clinic_groups)
+                source_info.append(f"clinic({len(clinic_groups)})")
         
         # 3) Add groups linked to this branch via group records
         if bid in BRANCH_TO_GROUP_IDS:
+            groups_added = 0
             for gid in BRANCH_TO_GROUP_IDS[bid]:
                 group_rec = ALL_GROUPS_BY_ID.get(gid, {})
                 if isinstance(group_rec, dict) and group_rec.get("name"):
-                    bid_groups.add(_norm(group_rec["name"]))
+                    group_name = _norm(group_rec["name"])
+                    if group_name not in bid_groups:
+                        bid_groups.add(group_name)
+                        groups_added += 1
+            if groups_added > 0:
+                source_info.append(f"dedicated({groups_added})")
         
         BRANCH_TO_GROUPS[bid] = sorted(bid_groups)
+        
+        if bid_groups:
+            branches_with_groups += 1
+            branch_name = BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}")
+            print(f"    Branch {bid} ({branch_name}): {len(bid_groups)} groups [{', '.join(source_info)}]")
+        else:
+            branches_without_groups += 1
+            branch_name = BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}")
+            print(f"    Branch {bid} ({branch_name}): NO GROUPS")
     
     ALL_GROUPS = sorted(customer_groups | direct_branch_groups | dedicated_group_names)
-    print(f"  Found {len(ALL_GROUPS)} total groups")
+    print(f"\n  Summary: {len(ALL_GROUPS)} total groups across {branches_with_groups} branches")
     print(f"    - {len(customer_groups)} from customers")
     print(f"    - {len(direct_branch_groups)} from clinic records")
     print(f"    - {len(dedicated_group_names)} from dedicated group records")
+    print(f"    - {branches_without_groups} branches with NO groups found")
     if ALL_GROUPS:
-        for g in ALL_GROUPS[:3]:  # Show first 3
-            print(f"  - {g}")
+        for g in ALL_GROUPS[:5]:  # Show first 5
+            print(f"      • {g}")
     
     GROUP_OPTS = [{"label": g.title(), "value": g} for g in ALL_GROUPS]
     
@@ -1217,23 +1261,38 @@ def register_callbacks(app: dash.Dash):
         State("grp", "value"),
     )
     def sync_group_options_by_branch(selected_branches, selected_groups):
-        # Get groups for selected branches (or all groups if no selection)
-        if selected_branches:
-            # Combine groups from all selected branches
-            branch_group_sets = [BRANCH_TO_GROUPS.get(int(bid), set()) for bid in selected_branches]
-            groups = sorted(set().union(*branch_group_sets))
-        else:
-            # Show all available groups if no branch selected
-            groups = ALL_GROUPS
-        
-        opts = [{"label": g.title(), "value": g} for g in groups]
-        
-        # Preserve selected groups that are still valid
-        selected_groups_norm = [_norm(g) for g in (selected_groups or [])]
-        allowed_set = {o["value"] for o in opts}
-        pruned_selected = [g for g in selected_groups_norm if g in allowed_set]
-        
-        return opts, pruned_selected
+        """Update group options based on selected branches."""
+        try:
+            # Get groups for selected branches (or all groups if no selection)
+            if selected_branches:
+                # Combine groups from all selected branches
+                all_selected_groups: set[str] = set()
+                for bid in selected_branches:
+                    try:
+                        bid_int = int(bid)
+                        branch_groups = BRANCH_TO_GROUPS.get(bid_int, [])
+                        if isinstance(branch_groups, (list, set)):
+                            all_selected_groups.update(branch_groups)
+                    except (TypeError, ValueError):
+                        pass
+                groups = sorted(all_selected_groups)
+            else:
+                # Show all available groups if no branch selected
+                groups = ALL_GROUPS
+            
+            opts = [{"label": g.title(), "value": g} for g in groups]
+            
+            # Preserve selected groups that are still valid
+            selected_groups_norm = [_norm(g) for g in (selected_groups or [])]
+            allowed_set = {o["value"] for o in opts}
+            pruned_selected = [g for g in selected_groups_norm if g in allowed_set]
+            
+            return opts, pruned_selected
+        except Exception as e:
+            print(f"ERROR in sync_group_options_by_branch: {e}")
+            import traceback
+            traceback.print_exc()
+            return [], []
 
     # ① Load groups → Athlete selector
     @app.callback(
