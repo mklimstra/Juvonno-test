@@ -184,30 +184,37 @@ STATUS_CHOICES = [
 ]
 
 # ───────────────────────── Cache current status per athlete ─────────────────────────
+# ───────────────────────── Cache current status per athlete ─────────────────────────
 @functools.lru_cache(maxsize=2048)
 def _current_status_for_customer(cid: int) -> str:
-    appts = td.CID_TO_APPTS.get(int(cid), [])
-    status_rows = []
-    for ap in appts:
-        aid = ap.get("id")
-        date_str = td.tidy_date_str(ap.get("date"))
-        dt = pd.to_datetime(date_str, errors="coerce")
-        if pd.isna(dt):
-            continue
-        eids = td.encounter_ids_for_appt(aid)
-        max_eid = max(eids) if eids else None
-        s = td.extract_training_status(td.fetch_encounter(max_eid)) if max_eid else ""
-        if s:
-            status_rows.append((dt.normalize(), s))
-    if not status_rows:
+    try:
+        appts = td.CID_TO_APPTS.get(int(cid), [])
+        status_rows = []
+        for ap in appts:
+            try:
+                aid = ap.get("id")
+                date_str = td.tidy_date_str(ap.get("date"))
+                dt = pd.to_datetime(date_str, errors="coerce")
+                if pd.isna(dt):
+                    continue
+                eids = td.encounter_ids_for_appt(aid)
+                max_eid = max(eids) if eids else None
+                s = td.extract_training_status(td.fetch_encounter(max_eid)) if max_eid else ""
+                if s:
+                    status_rows.append((dt.normalize(), s))
+            except Exception:
+                continue
+        if not status_rows:
+            return ""
+        df_s = pd.DataFrame(status_rows, columns=["Date", "Status"]).sort_values("Date")
+        df_s = df_s.drop_duplicates("Date", keep="last")
+        full_idx = pd.date_range(start=df_s["Date"].min(),
+                                 end=pd.Timestamp("today").normalize(), freq="D")
+        df_full = pd.DataFrame({"Date": full_idx}).merge(df_s, on="Date", how="left").sort_values("Date")
+        df_full["Status"] = df_full["Status"].ffill()
+        return str(df_full.iloc[-1]["Status"]) if not df_full.empty else ""
+    except Exception:
         return ""
-    df_s = pd.DataFrame(status_rows, columns=["Date", "Status"]).sort_values("Date")
-    df_s = df_s.drop_duplicates("Date", keep="last")
-    full_idx = pd.date_range(start=df_s["Date"].min(),
-                             end=pd.Timestamp("today").normalize(), freq="D")
-    df_full = pd.DataFrame({"Date": full_idx}).merge(df_s, on="Date", how="left").sort_values("Date")
-    df_full["Status"] = df_full["Status"].ffill()
-    return str(df_full.iloc[-1]["Status"]) if not df_full.empty else ""
 
 # ───────────────────────── Tab 1 (Overview) ─────────────────────────
 def tab1_layout():
@@ -397,12 +404,17 @@ def enforce_session(_n):
     State("t1-group-dd", "value"),
 )
 def t1_sync_groups_by_branch(branch_values, selected_groups):
-    groups = td.groups_for_branches(branch_values)
-    opts = [{"label": g.title(), "value": g} for g in groups]
-    selected_groups_norm = [td._norm(g) for g in (selected_groups or [])]
-    allowed_set = {o["value"] for o in opts}
-    pruned = [g for g in selected_groups_norm if g in allowed_set]
-    return opts, pruned
+    try:
+        # Use groups_for_branches for static/cached data to avoid API timeouts
+        groups = td.groups_for_branches(branch_values)
+        opts = [{"label": g.title(), "value": g} for g in groups]
+        selected_groups_norm = [td._norm(g) for g in (selected_groups or [])]
+        allowed_set = {o["value"] for o in opts}
+        pruned = [g for g in selected_groups_norm if g in allowed_set]
+        return opts, pruned
+    except Exception as e:
+        print(f"WARNING: Error syncing groups: {e}")
+        return [], None
 
 
 @app.callback(
@@ -445,11 +457,14 @@ def t1_load_customers(n_clicks, branch_values, group_values):
             status_color = td.PASTEL_COLOR.get(current_status, "#e6e6e6")
             status_html = f"{dot_html(status_color)}{html_escape(current_status) if current_status else '—'}" if current_status else "—"
 
-            complaints = td.fetch_customer_complaints(cid)
-            complaint_names = [c["Title"] for c in complaints if c.get("Title")]
-            complaints_html = " ".join(
-                pill_html(t, color_for_label(t), border=BORDER) for t in complaint_names
-            ) if complaint_names else "—"
+            try:
+                complaints = td.fetch_customer_complaints(cid)
+                complaint_names = [c["Title"] for c in complaints if c.get("Title")]
+                complaints_html = " ".join(
+                    pill_html(t, color_for_label(t), border=BORDER) for t in complaint_names
+                ) if complaint_names else "—"
+            except Exception:
+                complaints_html = "—"
 
             rows.append({
                 "First Name": first,
@@ -550,10 +565,14 @@ def t1_on_select(selected_rows, rows_json):
     cid = int(row["_cid"])
     label = row["_athlete_label"]
 
-    complaints = td.fetch_customer_complaints(cid)
-    names = [c["Title"] for c in complaints if c.get("Title")]
-    opts = [{"label": n, "value": n} for n in sorted(set(names))]
-    val = opts[0]["value"] if opts else None
+    try:
+        complaints = td.fetch_customer_complaints(cid)
+        names = [c["Title"] for c in complaints if c.get("Title")]
+        opts = [{"label": n, "value": n} for n in sorted(set(names))]
+        val = opts[0]["value"] if opts else None
+    except Exception:
+        opts = []
+        val = None
 
     comments = _db_list_comments_with_ids([cid])
     expanded = [_expand_comment_record(rec, label, cid) for rec in comments]
