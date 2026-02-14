@@ -469,6 +469,24 @@ BRANCH_TO_GROUPS = {
     for bid, cids in BRANCH_TO_CUSTOMER_IDS.items()
 }
 
+def groups_for_branches(branch_values) -> List[str]:
+    selected: set[int] = set()
+    for value in (branch_values or []):
+        try:
+            if value is None or value == "":
+                continue
+            selected.add(int(value))
+        except (TypeError, ValueError):
+            continue
+
+    if not selected:
+        return [g["value"] for g in GROUP_OPTS]
+
+    groups: set[str] = set()
+    for bid in selected:
+        groups.update(BRANCH_TO_GROUPS.get(int(bid), []))
+    return sorted(groups)
+
 BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
 BRANCH_IDS     = sorted(set(fetch_available_branches(CUSTOMERS)) | set(BRANCH_NAME_BY_ID.keys()))
 BRANCH_OPTS    = sorted(
@@ -881,16 +899,8 @@ def register_callbacks(app: dash.Dash):
         State("grp", "value"),
     )
     def sync_group_options_by_branch(selected_branches, selected_groups):
-        branch_targets = {int(v) for v in (selected_branches or [])}
-
-        if not branch_targets:
-            return GROUP_OPTS, selected_groups
-
-        allowed_groups: set[str] = set()
-        for bid in branch_targets:
-            allowed_groups.update(BRANCH_TO_GROUPS.get(int(bid), []))
-
-        opts = [{"label": g.title(), "value": g} for g in sorted(allowed_groups)]
+        groups = groups_for_branches(selected_branches)
+        opts = [{"label": g.title(), "value": g} for g in groups]
         selected_groups_norm = [_norm(g) for g in (selected_groups or [])]
         allowed_set = {o["value"] for o in opts}
         pruned_selected = [g for g in selected_groups_norm if g in allowed_set]
