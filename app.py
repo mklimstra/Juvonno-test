@@ -425,8 +425,8 @@ def t1_load_customers(n_clicks, branch_values, group_values):
         rows = []
 
         for cid, cust in td.CUSTOMERS.items():
-            cust_groups = set(td.CID_TO_GROUPS.get(cid, []))
-            cust_branch = td.CID_TO_BRANCH.get(cid)
+            cust_groups = set(td._customer_groups(cid, cust))
+            cust_branch = td._customer_branch(cid, cust)
 
             if targets and not (targets & cust_groups):
                 continue
