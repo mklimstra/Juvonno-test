@@ -216,11 +216,17 @@ def tab1_layout():
 
         dbc.Row([
             dbc.Col(dcc.Dropdown(
+                id="t1-branch-dd",
+                options=td.BRANCH_OPTS,
+                multi=True,
+                placeholder="Select branch(es)…"
+            ), md=4),
+            dbc.Col(dcc.Dropdown(
                 id="t1-group-dd",
                 options=td.GROUP_OPTS,
                 multi=True,
                 placeholder="Select athlete group(s)…"
-            ), md=6),
+            ), md=4),
             dbc.Col(dbc.Button("Load", id="t1-load", color="primary", className="w-100"), md=2),
         ], className="g-2 mb-2"),
 
@@ -390,20 +396,27 @@ def enforce_session(_n):
     Output("t1-msg", "children"),
     Output("t1-msg", "is_open"),
     Input("t1-load", "n_clicks"),
+    State("t1-branch-dd", "value"),
     State("t1-group-dd", "value"),
     prevent_initial_call=True
 )
-def t1_load_customers(n_clicks, group_values):
+def t1_load_customers(n_clicks, branch_values, group_values):
     try:
-        if not group_values:
-            return no_update, no_update, "Select at least one group.", True
+        if not group_values and not branch_values:
+            return no_update, no_update, "Select at least one branch or group.", True
 
-        targets = {td._norm(g) for g in group_values}
+        targets = {td._norm(g) for g in (group_values or [])}
+        branch_targets = {int(v) for v in (branch_values or [])}
         rows = []
 
         for cid, cust in td.CUSTOMERS.items():
             cust_groups = set(td.CID_TO_GROUPS.get(cid, []))
-            if not (targets & cust_groups):
+            cust_branch = td.CID_TO_BRANCH.get(cid)
+
+            if targets and not (targets & cust_groups):
+                continue
+
+            if branch_targets and cust_branch not in branch_targets:
                 continue
 
             first = (cust.get("first_name") or "").strip()
