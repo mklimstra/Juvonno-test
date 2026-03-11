@@ -5,6 +5,22 @@
 * Pagination
 * Downloading of aggregate paged data
 
+# Development with GitHub Codespaces
+
+This repository is configured for GitHub Codespaces. To start developing:
+
+1. Click the green "Code" button on GitHub
+2. Select the "Codespaces" tab
+3. Click "Create codespace on main" (or your desired branch)
+
+The environment will automatically:
+- Set up Python 3.11
+- Install all dependencies from `requirements.txt`
+- Forward port 8050 for the Dash application
+- Configure VS Code with Python extensions
+
+After the codespace starts, create your `.env` file with the required credentials and run the application.
+
 # Requirements
 
 Create a '.env' file with CLIENT_ID, CLIENT_SECRET, APP_URL and SITE_URL. These require 
