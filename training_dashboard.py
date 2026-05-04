@@ -1030,65 +1030,25 @@ def fetch_customer_complaints(customer_id: int) -> List[Dict]:
 @functools.lru_cache(maxsize=64)
 def get_athletes_for_branch(branch_id: int) -> List[Dict]:
     """
-    Get all athletes (customers) for a specific branch via direct API call.
-    Uses clinic_id filter to only fetch customers for the selected branch.
+    Fetch athletes for a branch using GET /branches/{branchId}/customers.
     Results are LRU-cached per branch.
     """
     athletes = []
-    cid_seen: set[int] = set()
+    try:
+        rows = _fetch_all_rows(f"branches/{branch_id}/customers", {}, page_size=100, max_pages=500)
+        for c in rows:
+            if not isinstance(c, dict) or c.get("id") is None:
+                continue
+            cid = int(c["id"])
+            first = (c.get("first_name") or "").strip()
+            last  = (c.get("last_name") or "").strip()
+            name  = f"{first} {last}".strip() or c.get("name", f"Athlete {cid}")
+            athletes.append({"id": cid, "label": name, "value": cid})
+        print(f"  Branch {branch_id}: {len(athletes)} athletes")
+    except Exception as e:
+        print(f"  ERROR loading athletes for branch {branch_id}: {e}")
 
-    def _extract_athlete(cust: Dict) -> Optional[Dict]:
-        cid = cust.get("id")
-        if not cid:
-            return None
-        try:
-            cid = int(cid)
-        except (TypeError, ValueError):
-            return None
-        if cid in cid_seen:
-            return None
-        cid_seen.add(cid)
-
-        # Build display name from customer record fields
-        first = (cust.get("first_name") or "").strip()
-        last  = (cust.get("last_name") or "").strip()
-        if not first and not last:
-            person = cust.get("person", {})
-            if isinstance(person, dict):
-                first = (person.get("first_name") or "").strip()
-                last  = (person.get("last_name") or "").strip()
-        name = f"{first} {last}".strip() or cust.get("name", f"Athlete {cid}")
-        return {"id": cid, "label": name, "value": cid}
-
-    # 1) Try the API endpoint with clinic_id filter (fast – server-side filtering)
-    filter_param_names = [
-        {"clinic_id": branch_id},
-        {"branch_id": branch_id},
-        {"location_id": branch_id},
-    ]
-    for params in filter_param_names:
-        try:
-            collected = _fetch_all_rows("customers/list", {**params, "include": "groups"}, page_size=100, max_pages=100)
-            if collected:
-                for c in collected:
-                    a = _extract_athlete(c)
-                    if a:
-                        athletes.append(a)
-                print(f"  Loaded {len(athletes)} athletes for branch {branch_id} via {list(params.keys())[0]}")
-                break
-        except Exception:
-            pass
-
-    # 2) Fall back: filter in-memory CUSTOMERS (populated if the Status History tab has been used)
-    if not athletes and CUSTOMERS:
-        for cid, cust in CUSTOMERS.items():
-            cbid = _customer_branch(int(cid), cust)
-            if cbid == int(branch_id):
-                a = _extract_athlete(cust)
-                if a:
-                    athletes.append(a)
-
-    return sorted(athletes, key=lambda x: (x.get("label", "").lower(), x.get("id", 0)))
+    return sorted(athletes, key=lambda x: (x["label"].lower(), x["id"]))
 
 @functools.lru_cache(maxsize=256)
 def get_encounters_for_complaint(complaint_id: int, customer_id: int) -> List[Dict]:

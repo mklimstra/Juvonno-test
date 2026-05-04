@@ -238,12 +238,15 @@ def tab1_layout():
                     ], md=3),
                     dbc.Col([
                         html.Label("Athlete", className="fw-bold"),
-                        dcc.Dropdown(
-                            id="t1-athlete-dd",
-                            placeholder="Select a branch first…",
-                            clearable=True,
-                            style={"width":"100%"},
-                            disabled=True
+                        dcc.Loading(
+                            dcc.Dropdown(
+                                id="t1-athlete-dd",
+                                placeholder="Select a branch first…",
+                                clearable=True,
+                                style={"width":"100%"},
+                                disabled=True
+                            ),
+                            type="circle",
                         ),
                     ], md=3),
                     dbc.Col([
@@ -836,13 +839,16 @@ def t1_load_athletes(branch_id):
     try:
         athletes = td.get_athletes_for_branch(int(branch_id))
         options = [{"label": a["label"], "value": a["id"]} for a in athletes]
-        status_msg = f"Loaded {len(athletes)} athlete(s). Select one to view complaints."
+        if options:
+            status_msg = f"{len(options)} athlete(s) in this branch. Select one to view complaints."
+        else:
+            status_msg = "No athletes found for this branch."
         return options, False, None, [], True, None, status_msg
     except Exception as e:
         print(f"Error loading athletes: {e}")
         import traceback
         traceback.print_exc()
-        return [], True, None, [], True, None, f"Error loading athletes: {str(e)}"
+        return [], True, None, [], True, None, f"Error: {str(e)}"
 
 # Step 2: Load complaints when athlete is selected
 @app.callback(
