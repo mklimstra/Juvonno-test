@@ -630,35 +630,12 @@ def fetch_customer_detail(customer_id: int) -> Dict:
 
 _require_api_key()
 
-# Initialize with error handling
+# Initialize with empty dicts — populated lazily by callbacks
 CUSTOMERS: Dict[int, Dict] = {}
 CID_TO_GROUPS: Dict[int, List[str]] = {}
 CID_TO_BRANCH: Dict[int, Optional[int]] = {}
 BRANCH_TO_CUSTOMER_IDS: Dict[int, set[int]] = {}
 BRANCH_TO_GROUPS: Dict[int, List[str]] = {}
-
-try:
-    CUSTOMERS = enrich_customers(fetch_customers_full())
-    
-    def groups_of(cust: Dict) -> List[str]:
-        return _group_names_from_customer(cust)
-    
-    CID_TO_GROUPS  = {cid: groups_of(c) for cid, c in CUSTOMERS.items()}
-    CID_TO_BRANCH  = {cid: _branch_id_from_obj(c) for cid, c in CUSTOMERS.items()}
-    
-    for cid, bid in CID_TO_BRANCH.items():
-        if bid is not None:
-            BRANCH_TO_CUSTOMER_IDS.setdefault(int(bid), set()).add(int(cid))
-    
-    BRANCH_TO_GROUPS = {
-        bid: sorted({g for cid in cids for g in CID_TO_GROUPS.get(cid, [])})
-        for bid, cids in BRANCH_TO_CUSTOMER_IDS.items()
-    }
-except Exception as e:
-    print(f"WARNING: Failed to fetch customers during initialization: {e}")
-    import traceback
-    traceback.print_exc()
-    # Continue anyway with empty dicts
 
 def _customer_branch(cid: int, cust: Optional[Dict] = None) -> Optional[int]:
     bid = CID_TO_BRANCH.get(int(cid))
@@ -738,71 +715,43 @@ ALL_GROUPS_BY_ID: Dict[int, Dict] = {}
 BRANCH_TO_GROUP_IDS: Dict[int, set[int]] = {}
 
 print("\n" + "="*60)
-print("INITIALIZING TRAINING DASHBOARD")
+print("INITIALIZING TRAINING DASHBOARD (lightweight)")
 print("="*60)
 print(f"API_KEY set: {bool(API_KEY)}")
 
+# ── LIGHTWEIGHT STARTUP: only load branches so the first dropdown is ready ──
+# Customers / athletes are loaded lazily per-branch when the user selects one.
 try:
-    print(f"\nStep 1: Load Customers")
+    print(f"\nStep 1: Skipped (customers loaded on demand per branch)")
     if CUSTOMERS:
-        print(f"  Reusing {len(CUSTOMERS)} customers from module init")
-        print(f"  Enrichment complete, proceeding to next step...")
+        print(f"  Using {len(CUSTOMERS)} already-loaded customers")
     else:
-        CUSTOMERS = enrich_customers(fetch_customers_full())
-        print(f"  Loaded: {len(CUSTOMERS)} customers")
-        print(f"  Enrichment complete, proceeding to next step...")
+        pass  # customers will be fetched lazily
     
     print(f"\nStep 2: Load Branches/Clinics Directly")
     DIRECT_BRANCHES = fetch_branches_and_clinics_direct()
     
-    print(f"\nStep 3: Load Groups from Dedicated Endpoints")
-    ALL_GROUPS_BY_ID, BRANCH_TO_GROUP_IDS = fetch_groups_and_branch_assignments()
+    # Fallback: if no direct branch endpoint works, extract branches from one page of customers
+    if not DIRECT_BRANCHES:
+        print("  No direct branch endpoint found; extracting branch names from customers/list (1 page)...")
+        try:
+            sample = _fetch_all_rows("customers/list", {"include": "clinic,location,branch"}, page_size=100, max_pages=1)
+            for c in sample:
+                bid = _branch_id_from_obj(c)
+                if bid is not None and bid not in DIRECT_BRANCHES:
+                    # Build a minimal branch dict from the nested object
+                    for obj_key in ("clinic", "branch", "location"):
+                        obj = c.get(obj_key)
+                        if isinstance(obj, dict) and obj.get("id") and int(obj["id"]) == bid:
+                            DIRECT_BRANCHES[bid] = dict(obj)
+                            break
+                    else:
+                        DIRECT_BRANCHES[bid] = {"id": bid}
+            print(f"  Extracted {len(DIRECT_BRANCHES)} branches from customer sample")
+        except Exception as fe:
+            print(f"  Fallback also failed: {fe}")
     
-    # DEBUG: Show which branches are referenced in group records
-    if BRANCH_TO_GROUP_IDS:
-        print(f"  Group endpoint references these branches:")
-        for bid in sorted(BRANCH_TO_GROUP_IDS.keys()):
-            gids = BRANCH_TO_GROUP_IDS[bid]
-            group_names = [ALL_GROUPS_BY_ID.get(gid, {}).get("name", f"#{gid}") for gid in sorted(gids)]
-            print(f"    Branch {bid}: {len(gids)} groups {group_names[:2]}")
-    else:
-        print(f"  WARNING: No branch-to-group associations found in dedicated group endpoint!")
-    
-    print(f"\nStep 4: Extract Group Mappings from Customers")
-    def groups_of(cust: Dict) -> List[str]:
-        return _group_names_from_customer(cust)
-    
-    CID_TO_GROUPS  = {cid: groups_of(c) for cid, c in CUSTOMERS.items()}
-    CID_TO_BRANCH  = {cid: _branch_id_from_obj(c) for cid, c in CUSTOMERS.items()}
-    customers_with_branch = len({cid for cid, bid in CID_TO_BRANCH.items() if bid is not None})
-    customers_with_groups = len({cid for cid, groups in CID_TO_GROUPS.items() if groups})
-    print(f"  Customers with branch info: {customers_with_branch}")
-    print(f"  Customers with groups: {customers_with_groups}")
-    
-    # DEBUG: Show distribution of groups across branches from customers
-    print(f"\n  DEBUG: Customer groups by branch:")
-    branch_to_customer_groups: Dict[int, set[str]] = {}
-    branch_to_singular_group_field: Dict[int, set[str]] = {}  # Track singular "group" fields
-    
-    for cid, bid in CID_TO_BRANCH.items():
-        if bid is not None:
-            BRANCH_TO_CUSTOMER_IDS.setdefault(int(bid), set()).add(int(cid))
-            groups = CID_TO_GROUPS.get(cid, [])
-            branch_to_customer_groups.setdefault(bid, set()).update(groups)
-            
-            # Also track singular "group" field directly
-            cust = CUSTOMERS.get(cid, {})
-            if isinstance(cust, dict):
-                singular_group = cust.get("group")
-                if isinstance(singular_group, dict) and singular_group.get("name"):
-                    group_name = _norm(singular_group["name"])
-                    branch_to_singular_group_field.setdefault(bid, set()).add(group_name)
-    
-    # NOTE: Debug output moved to after Step 6 where BRANCH_IDS is populated
-    
-    print(f"\nStep 5: Extract Branch Names")
-    BRANCH_NAME_BY_ID = fetch_branch_name_map(CUSTOMERS)
-    # Add names from directly-loaded branches
+    # Use branch names and IDs from directly-loaded clinics
     for bid, branch in DIRECT_BRANCHES.items():
         if bid not in BRANCH_NAME_BY_ID and isinstance(branch, dict):
             for name_key in ("name", "title", "label", "code", "clinic_name", "branch_name"):
@@ -810,29 +759,12 @@ try:
                 if isinstance(val, str) and val.strip():
                     BRANCH_NAME_BY_ID[bid] = val.strip()
                     break
+    
+    BRANCH_IDS = sorted(DIRECT_BRANCHES.keys())
+    print(f"  Total: {len(BRANCH_IDS)} branches")
     print(f"  Found {len(BRANCH_NAME_BY_ID)} branch names")
     
-    print(f"\nStep 6: Get All Branch IDs")
-    BRANCH_IDS = fetch_available_branches(CUSTOMERS, DIRECT_BRANCHES)
-    print(f"  Total: {len(BRANCH_IDS)}")
-    
-    # DEBUG: Show distribution of groups across branches (now that BRANCH_IDS is populated)
-    print(f"\n  DEBUG: Customer groups by branch:")
-    branches_with_groups = 0
-    for bid in sorted(BRANCH_IDS):
-        cid_count = len(BRANCH_TO_CUSTOMER_IDS.get(bid, set()))
-        groups = sorted(branch_to_customer_groups.get(bid, set()))
-        if groups:
-            branches_with_groups += 1
-            branch_name = BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}")
-            print(f"    ✓ {branch_name}: {cid_count} customers → {len(groups)} groups")
-    
-    if branches_with_groups == len(BRANCH_IDS):
-        print(f"\n  🎉 SUCCESS! All {len(BRANCH_IDS)} branches have groups!")
-    else:
-        print(f"\n  {branches_with_groups}/{len(BRANCH_IDS)} branches have groups")
-    
-    print(f"\nStep 7: Create Branch Options")
+    print(f"\nStep 3: Create Branch Options")
     BRANCH_OPTS = sorted(
         [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS],
         key=lambda o: (str(o.get("label", "")).casefold(), int(o.get("value", 0)))
@@ -842,99 +774,15 @@ try:
         print(f"  {i}. {opt['label']}")
     if len(BRANCH_OPTS) > 5:
         print(f"  ... and {len(BRANCH_OPTS) - 5} more")
-    
-    # Step 8: Extract Groups - combine from customers + dedicated group records + branch assignments
-    print(f"\nStep 8: Extract and Map Groups")
-    # Groups from customers (as set for union operations)
-    customer_groups_set = {g for lst in CID_TO_GROUPS.values() for g in lst}
-    # Groups from directly-loaded branches/clinics
-    direct_branch_groups: set[str] = set()
-    for branch in DIRECT_BRANCHES.values():
-        if isinstance(branch, dict):
-            branch_groups = _group_names_from_customer(branch)
-            direct_branch_groups.update(branch_groups)
-    # Groups from dedicated group records
-    dedicated_group_names = {_norm(g.get("name", "")) for g in ALL_GROUPS_BY_ID.values() if g.get("name")}
-    
-    # Build branch-to-groups map from ALL sources
-    BRANCH_TO_GROUPS = {}
-    branches_with_groups = 0
-    branches_without_groups = 0
-    branches_without_groups_list: List[Tuple[int, str]] = []
-    
-    for bid in BRANCH_IDS:
-        bid_groups: set[str] = set()
-        source_info = []
-        
-        # 1) Add groups from customers in this branch
-        customers_in_branch = {cid for cid, cust_branch in CID_TO_BRANCH.items() if cust_branch == bid}
-        if customers_in_branch:
-            for cid in customers_in_branch:
-                groups_for_cid = CID_TO_GROUPS.get(cid, [])
-                if groups_for_cid:
-                    bid_groups.update(groups_for_cid)
-            if bid_groups:
-                source_info.append(f"customer({len(bid_groups)})")
-        
-        # 2) Add groups from the clinic record itself
-        if bid in DIRECT_BRANCHES:
-            clinic_groups = _group_names_from_customer(DIRECT_BRANCHES[bid])
-            if clinic_groups:
-                bid_groups.update(clinic_groups)
-                source_info.append(f"clinic({len(clinic_groups)})")
-        
-        # 3) Add groups linked to this branch via group records
-        if bid in BRANCH_TO_GROUP_IDS:
-            groups_added = 0
-            for gid in BRANCH_TO_GROUP_IDS[bid]:
-                group_rec = ALL_GROUPS_BY_ID.get(gid, {})
-                if isinstance(group_rec, dict) and group_rec.get("name"):
-                    group_name = _norm(group_rec["name"])
-                    if group_name not in bid_groups:
-                        bid_groups.add(group_name)
-                        groups_added += 1
-            if groups_added > 0:
-                source_info.append(f"dedicated({groups_added})")
-        
-        BRANCH_TO_GROUPS[bid] = sorted(bid_groups)
-        
-        branch_name = BRANCH_NAME_BY_ID.get(bid, f"(ID {bid})")
-        if bid_groups:
-            branches_with_groups += 1
-            print(f"    ✓ {branch_name}: {len(bid_groups)} groups [{', '.join(source_info)}]")
-        else:
-            branches_without_groups += 1
-            branches_without_groups_list.append((bid, branch_name))
-            print(f"    ✗ {branch_name}: NO GROUPS")
-    
-    if branches_without_groups_list:
-        print(f"\n  Branches with NO groups ({branches_without_groups} total):")
-        for bid, name in branches_without_groups_list:
-            cust_count = len(BRANCH_TO_CUSTOMER_IDS.get(bid, set()))
-            has_direct_record = "yes" if bid in DIRECT_BRANCHES else "no"
-            has_group_mapping = "yes" if bid in BRANCH_TO_GROUP_IDS else "no"
-            print(f"    - {name}: {cust_count} customers, direct_branch={has_direct_record}, group_mapping={has_group_mapping}")
-    
-    ALL_GROUPS = sorted(customer_groups_set | direct_branch_groups | dedicated_group_names)
-    print(f"\n  Summary: {len(ALL_GROUPS)} total groups across {branches_with_groups} branches with groups")
-    print(f"    - {len(customer_groups_set)} from customers")
-    print(f"    - {len(direct_branch_groups)} from clinic records")
-    print(f"    - {len(dedicated_group_names)} from dedicated group records")
-    print(f"    - {branches_without_groups} branches with NO groups found")
-    if ALL_GROUPS:
-        for g in ALL_GROUPS[:5]:  # Show first 5
-            print(f"      • {g}")
-    
-    GROUP_OPTS = [{"label": g.title(), "value": g} for g in ALL_GROUPS]
-    
-    print("\n✓ INITIALIZATION COMPLETE")
+
+    print("\n✓ INITIALIZATION COMPLETE (branches loaded; athletes/complaints/encounters load on demand)")
 except Exception as e:
     print(f"\n✗ ERROR during initialization: {e}")
     import traceback
     traceback.print_exc()
     print("\nContinuing with available data...")
 
-# ────────── Appointments (all known branches) ──────────
+# ────────── Appointments (lazy-loaded on demand) ──────────
 def fetch_branch_appts(branch=1) -> List[Dict]:
     rows, page = [], 1
     while True:
@@ -949,7 +797,6 @@ def fetch_branch_appts(branch=1) -> List[Dict]:
 def fetch_all_branch_appts(branch_ids: List[int]) -> List[Dict]:
     all_appts: List[Dict] = []
     targets = branch_ids or [1]
-    # Limit to branches that have customers (to avoid unnecessary API calls)
     targets = [b for b in targets if b in BRANCH_TO_CUSTOMER_IDS]
     if not targets:
         print("  (No branches with customers; skipping appointments fetch)")
@@ -971,36 +818,6 @@ def fetch_all_branch_appts(branch_ids: List[int]) -> List[Dict]:
 
 BRANCH_APPTS: List[Dict] = []
 CID_TO_APPTS: Dict[int, List[Dict]] = {}
-
-# NOTE: Appointments are now lazy-loaded on-demand when a user selects a branch
-# Skipping pre-loading during init to avoid timeout
-print("\nLoading appointments (skipped for now - will lazy-load on demand)")
-# try:
-#     print("\nLoading appointments for all branches...")
-#     BRANCH_APPTS = fetch_all_branch_appts(BRANCH_IDS)
-#     print(f"  Loaded {len(BRANCH_APPTS)} total appointments")
-#     
-#     for ap in BRANCH_APPTS:
-#         cust = ap.get("customer", {})
-#         if isinstance(cust, dict) and cust.get("id"):
-#             cid = int(cust["id"])
-#             CID_TO_APPTS.setdefault(cid, []).append(ap)
-#             if CID_TO_BRANCH.get(cid) is None:
-#                 ap_branch = _branch_id_from_obj(ap)
-#                 if ap_branch is not None:
-#                    CID_TO_BRANCH[cid] = ap_branch
-# except Exception as e:
-#     print(f"WARNING: Failed to fetch appointments during initialization: {e}")
-#     print("  Continuing without appointments (will lazy-load on demand)")
-#     # Continue with empty appointments - they can be fetched on demand
-
-if not BRANCH_IDS:
-    BRANCH_IDS = sorted({b for b in CID_TO_BRANCH.values() if b is not None})
-    if BRANCH_IDS:
-        BRANCH_OPTS = sorted(
-            [{"label": BRANCH_NAME_BY_ID.get(bid, f"Branch {bid}"), "value": bid} for bid in BRANCH_IDS],
-            key=lambda o: (str(o.get("label", "")).casefold(), int(o.get("value", 0)))
-        )
 
 # ────────── Encounters / Training Status ──────────
 FLAGS = [{}, {"include": "fields"}, {"include": "answers"}, {"full": 1}]
@@ -1210,36 +1027,67 @@ def fetch_customer_complaints(customer_id: int) -> List[Dict]:
     return sorted(dedup.values(), key=_sort_key, reverse=True)
 
 # ────────── Cascading Data Loading (Branch → Athlete → Complaint → Encounters) ──────────
+@functools.lru_cache(maxsize=64)
 def get_athletes_for_branch(branch_id: int) -> List[Dict]:
     """
-    Get all athletes (customers) for a specific branch.
-    Returns list of dicts with 'id', 'label' (athlete name).
+    Get all athletes (customers) for a specific branch via direct API call.
+    Uses clinic_id filter to only fetch customers for the selected branch.
+    Results are LRU-cached per branch.
     """
     athletes = []
-    try:
+    cid_seen: set[int] = set()
+
+    def _extract_athlete(cust: Dict) -> Optional[Dict]:
+        cid = cust.get("id")
+        if not cid:
+            return None
+        try:
+            cid = int(cid)
+        except (TypeError, ValueError):
+            return None
+        if cid in cid_seen:
+            return None
+        cid_seen.add(cid)
+
+        # Build display name from customer record fields
+        first = (cust.get("first_name") or "").strip()
+        last  = (cust.get("last_name") or "").strip()
+        if not first and not last:
+            person = cust.get("person", {})
+            if isinstance(person, dict):
+                first = (person.get("first_name") or "").strip()
+                last  = (person.get("last_name") or "").strip()
+        name = f"{first} {last}".strip() or cust.get("name", f"Athlete {cid}")
+        return {"id": cid, "label": name, "value": cid}
+
+    # 1) Try the API endpoint with clinic_id filter (fast – server-side filtering)
+    filter_param_names = [
+        {"clinic_id": branch_id},
+        {"branch_id": branch_id},
+        {"location_id": branch_id},
+    ]
+    for params in filter_param_names:
+        try:
+            collected = _fetch_all_rows("customers/list", {**params, "include": "groups"}, page_size=100, max_pages=100)
+            if collected:
+                for c in collected:
+                    a = _extract_athlete(c)
+                    if a:
+                        athletes.append(a)
+                print(f"  Loaded {len(athletes)} athletes for branch {branch_id} via {list(params.keys())[0]}")
+                break
+        except Exception:
+            pass
+
+    # 2) Fall back: filter in-memory CUSTOMERS (populated if the Status History tab has been used)
+    if not athletes and CUSTOMERS:
         for cid, cust in CUSTOMERS.items():
             cbid = _customer_branch(int(cid), cust)
             if cbid == int(branch_id):
-                # Extract athlete name
-                person = cust.get("person", {})
-                if isinstance(person, dict):
-                    first = (person.get("first_name") or "").strip()
-                    last = (person.get("last_name") or "").strip()
-                    name = f"{first} {last}".strip() or cust.get("name", f"Athlete {cid}")
-                else:
-                    name = cust.get("name", f"Athlete {cid}")
-                
-                athletes.append({
-                    "id": int(cid),
-                    "label": name,
-                    "value": int(cid)
-                })
-    except Exception as e:
-        print(f"Error loading athletes for branch {branch_id}: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    # Sort by label
+                a = _extract_athlete(cust)
+                if a:
+                    athletes.append(a)
+
     return sorted(athletes, key=lambda x: (x.get("label", "").lower(), x.get("id", 0)))
 
 @functools.lru_cache(maxsize=256)

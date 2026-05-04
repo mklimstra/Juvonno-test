@@ -846,9 +846,9 @@ def t1_load_athletes(branch_id):
 
 # Step 2: Load complaints when athlete is selected
 @app.callback(
-    Output("t1-complaint-select-dd", "options"),
-    Output("t1-complaint-select-dd", "disabled"),
-    Output("t1-complaint-select-dd", "value"),
+    Output("t1-complaint-select-dd", "options", allow_duplicate=True),
+    Output("t1-complaint-select-dd", "disabled", allow_duplicate=True),
+    Output("t1-complaint-select-dd", "value", allow_duplicate=True),
     Input("t1-athlete-dd", "value"),
     prevent_initial_call=True
 )
