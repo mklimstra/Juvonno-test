@@ -1209,6 +1209,114 @@ def fetch_customer_complaints(customer_id: int) -> List[Dict]:
 
     return sorted(dedup.values(), key=_sort_key, reverse=True)
 
+# ────────── Cascading Data Loading (Branch → Athlete → Complaint → Encounters) ──────────
+def get_athletes_for_branch(branch_id: int) -> List[Dict]:
+    """
+    Get all athletes (customers) for a specific branch.
+    Returns list of dicts with 'id', 'label' (athlete name).
+    """
+    athletes = []
+    try:
+        for cid, cust in CUSTOMERS.items():
+            cbid = _customer_branch(int(cid), cust)
+            if cbid == int(branch_id):
+                # Extract athlete name
+                person = cust.get("person", {})
+                if isinstance(person, dict):
+                    first = (person.get("first_name") or "").strip()
+                    last = (person.get("last_name") or "").strip()
+                    name = f"{first} {last}".strip() or cust.get("name", f"Athlete {cid}")
+                else:
+                    name = cust.get("name", f"Athlete {cid}")
+                
+                athletes.append({
+                    "id": int(cid),
+                    "label": name,
+                    "value": int(cid)
+                })
+    except Exception as e:
+        print(f"Error loading athletes for branch {branch_id}: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    # Sort by label
+    return sorted(athletes, key=lambda x: (x.get("label", "").lower(), x.get("id", 0)))
+
+@functools.lru_cache(maxsize=256)
+def get_encounters_for_complaint(complaint_id: int, customer_id: int) -> List[Dict]:
+    """
+    Get encounters related to a specific complaint for a customer.
+    Returns list of encounters with relevant details.
+    """
+    encounters = []
+    try:
+        # Try to fetch encounters for this customer's complaint
+        # First, get the complaint to understand its structure
+        complaints = fetch_customer_complaints(customer_id)
+        target_complaint = None
+        
+        for comp in complaints:
+            comp_id = comp.get("Id") or comp.get("id")
+            if comp_id == complaint_id:
+                target_complaint = comp
+                break
+        
+        if target_complaint:
+            # Try to get encounters linked to this complaint
+            # This might be through appointments, encounters endpoint, or complaint-specific endpoint
+            
+            # 1) Try direct complaint encounters endpoint
+            try:
+                js = _get(f"complaints/{complaint_id}/encounters", page=1, count=100)
+                block = _extract_rows(js)
+                if isinstance(block, list):
+                    encounters.extend(block)
+            except Exception:
+                pass
+            
+            # 2) Try to get from appointments that have this complaint
+            try:
+                appts_for_complainant = CID_TO_APPTS.get(customer_id, [])
+                for appt in appts_for_complainant:
+                    appt_id = appt.get("id")
+                    # Check if this appointment has the target complaint
+                    appt_complaints = list_complaints_for_appt(appt_id)
+                    for comp in appt_complaints:
+                        if (comp.get("Id") or comp.get("id")) == complaint_id:
+                            # This appointment has our complaint, get its encounters
+                            eids = encounter_ids_for_appt(appt_id)
+                            for eid in eids:
+                                try:
+                                    enc = fetch_encounter(eid)
+                                    if enc:
+                                        encounters.append(enc)
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
+            
+            # 3) If no encounters found yet, get all encounters for customer
+            if not encounters:
+                try:
+                    for appt in CID_TO_APPTS.get(customer_id, []):
+                        eids = encounter_ids_for_appt(appt.get("id"))
+                        for eid in eids:
+                            try:
+                                enc = fetch_encounter(eid)
+                                if enc:
+                                    encounters.append(enc)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+    
+    except Exception as e:
+        print(f"Error loading encounters for complaint {complaint_id}: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return encounters
+
 # ────────── Pastel palette (table + calendar) ──────────
 STATUS_ORDER = [
     "Full participation without injury/illness/other health problems",

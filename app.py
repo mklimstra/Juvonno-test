@@ -219,31 +219,68 @@ def _current_status_for_customer(cid: int) -> str:
 # ───────────────────────── Tab 1 (Overview) ─────────────────────────
 def tab1_layout():
     return dbc.Container([
-        html.H3("Athlete List", className="mt-2"),
+        html.H3("Browse Athlete Data", className="mt-2"),
 
-        dbc.Row([
-            dbc.Col(dcc.Dropdown(
-                id="t1-branch-dd",
-                options=td.BRANCH_OPTS,
-                multi=True,
-                placeholder="Select branch(es)…"
-            ), md=4),
-            dbc.Col(dcc.Dropdown(
-                id="t1-group-dd",
-                options=td.GROUP_OPTS,
-                multi=True,
-                placeholder="Select athlete group(s)…"
-            ), md=4),
-            dbc.Col(dbc.Button("Load", id="t1-load", color="primary", className="w-100"), md=2),
-        ], className="g-2 mb-2"),
+        # Cascading Selection Section
+        dbc.Card([
+            dbc.CardHeader("Select Data Path"),
+            dbc.CardBody([
+                dbc.Row([
+                    dbc.Col([
+                        html.Label("Branch", className="fw-bold"),
+                        dcc.Dropdown(
+                            id="t1-branch-dd",
+                            options=td.BRANCH_OPTS,
+                            placeholder="Select a branch…",
+                            clearable=True,
+                            style={"width":"100%"}
+                        ),
+                    ], md=3),
+                    dbc.Col([
+                        html.Label("Athlete", className="fw-bold"),
+                        dcc.Dropdown(
+                            id="t1-athlete-dd",
+                            placeholder="Select a branch first…",
+                            clearable=True,
+                            style={"width":"100%"},
+                            disabled=True
+                        ),
+                    ], md=3),
+                    dbc.Col([
+                        html.Label("Complaint", className="fw-bold"),
+                        dcc.Dropdown(
+                            id="t1-complaint-select-dd",
+                            placeholder="Select an athlete first…",
+                            clearable=True,
+                            style={"width":"100%"},
+                            disabled=True
+                        ),
+                    ], md=3),
+                    dbc.Col([
+                        html.Label("&nbsp;", className="fw-bold"),
+                        dbc.Button("View Encounters", id="t1-view-encounters-btn", 
+                                   color="primary", className="w-100", disabled=True),
+                    ], md=3),
+                ], className="g-2"),
+                
+                html.Div(id="t1-cascade-status", className="mt-2 text-muted small"),
+            ])
+        ], className="mb-3"),
+
+        # Encounters Display Section
+        dbc.Card([
+            dbc.CardHeader("Encounters for Selected Complaint"),
+            dbc.CardBody([
+                html.Div(id="t1-encounters-container"),
+                dcc.Store(id="t1-selected-complaint-data", data={}),
+            ])
+        ], className="mb-3"),
 
         dbc.Alert(id="t1-msg", is_open=False, color="danger"),
 
-        html.Div(id="t1-grid-container"),
-        dcc.Store(id="t1-rows-json", data=[]),
-
         html.Hr(),
 
+        # Comments Section (for backward compatibility with athlete selection)
         dbc.Card([
             dbc.CardHeader([
                 html.Span("Comments", className="me-2"),
@@ -312,6 +349,12 @@ def tab1_layout():
                 ),
             ])
         ], className="mb-4"),
+
+        # Data stores
+        dcc.Store(id="t1-rows-json", data=[]),
+        dcc.Store(id="t1-selected-branch", data=None),
+        dcc.Store(id="t1-selected-athlete", data=None),
+        dcc.Store(id="t1-selected-complaint", data=None),
     ], fluid=True)
 
 # ───────────────────────── Tab 2 (Training Dashboard) ─────────────────────────
@@ -772,6 +815,137 @@ def _expand_comment_record(rec, athlete_label, cid: int):
         "Status": status or "",
         "Comment": rec["Comment"],
     }
+
+# ───────────────────────── Cascading Callbacks ─────────────────────────
+# Step 1: Load athletes when branch is selected
+@app.callback(
+    Output("t1-athlete-dd", "options"),
+    Output("t1-athlete-dd", "disabled"),
+    Output("t1-athlete-dd", "value"),
+    Output("t1-complaint-select-dd", "options"),
+    Output("t1-complaint-select-dd", "disabled"),
+    Output("t1-complaint-select-dd", "value"),
+    Output("t1-cascade-status", "children"),
+    Input("t1-branch-dd", "value"),
+    prevent_initial_call=True
+)
+def t1_load_athletes(branch_id):
+    if not branch_id:
+        return [], True, None, [], True, None, "Select a branch to load athletes."
+    
+    try:
+        athletes = td.get_athletes_for_branch(int(branch_id))
+        options = [{"label": a["label"], "value": a["id"]} for a in athletes]
+        status_msg = f"Loaded {len(athletes)} athlete(s). Select one to view complaints."
+        return options, False, None, [], True, None, status_msg
+    except Exception as e:
+        print(f"Error loading athletes: {e}")
+        import traceback
+        traceback.print_exc()
+        return [], True, None, [], True, None, f"Error loading athletes: {str(e)}"
+
+# Step 2: Load complaints when athlete is selected
+@app.callback(
+    Output("t1-complaint-select-dd", "options"),
+    Output("t1-complaint-select-dd", "disabled"),
+    Output("t1-complaint-select-dd", "value"),
+    Input("t1-athlete-dd", "value"),
+    prevent_initial_call=True
+)
+def t1_load_complaints(athlete_id):
+    if not athlete_id:
+        return [], True, None
+    
+    try:
+        complaints = td.fetch_customer_complaints(int(athlete_id))
+        options = [
+            {
+                "label": c.get("Title") or c.get("title") or c.get("name") or f"Complaint {c.get('Id', c.get('id'))}",
+                "value": c.get("Id") or c.get("id")
+            }
+            for c in complaints
+        ]
+        return options, False, None
+    except Exception as e:
+        print(f"Error loading complaints: {e}")
+        import traceback
+        traceback.print_exc()
+        return [], True, None
+
+# Step 3: Enable/disable View Encounters button based on complaint selection
+@app.callback(
+    Output("t1-view-encounters-btn", "disabled"),
+    Input("t1-complaint-select-dd", "value"),
+    prevent_initial_call=True
+)
+def t1_button_state(complaint_id):
+    return not bool(complaint_id)
+
+# Step 4: Load and display encounters when button is clicked or complaint is selected
+@app.callback(
+    Output("t1-encounters-container", "children"),
+    Output("t1-selected-complaint-data", "data"),
+    Input("t1-view-encounters-btn", "n_clicks"),
+    State("t1-branch-dd", "value"),
+    State("t1-athlete-dd", "value"),
+    State("t1-complaint-select-dd", "value"),
+    prevent_initial_call=True
+)
+def t1_view_encounters(n_clicks, branch_id, athlete_id, complaint_id):
+    if not all([branch_id, athlete_id, complaint_id]):
+        return dbc.Alert("Please select branch, athlete, and complaint.", color="warning"), {}
+    
+    try:
+        encounters = td.get_encounters_for_complaint(int(complaint_id), int(athlete_id))
+        
+        if not encounters:
+            content = dbc.Alert("No encounters found for this complaint.", color="info")
+        else:
+            rows = []
+            for enc in encounters:
+                rows.append({
+                    "Date": enc.get("date") or enc.get("Date") or "—",
+                    "Type": enc.get("type") or enc.get("encounter_type") or "—",
+                    "Notes": (enc.get("notes") or enc.get("Notes") or "")[:100],
+                    "_data": str(enc)
+                })
+            
+            table = dash_table.DataTable(
+                data=rows,
+                columns=[
+                    {"name": "Date", "id": "Date"},
+                    {"name": "Type", "id": "Type"},
+                    {"name": "Notes", "id": "Notes"},
+                ],
+                style_table={"overflowX":"auto"},
+                style_header={"fontWeight":"600","backgroundColor":"#f8f9fa"},
+                style_cell={"padding":"9px","fontSize":14},
+                style_data={"borderBottom":"1px solid #eceff4"},
+                style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
+            )
+            content = html.Div([
+                html.H6(f"Encounters for selected complaint ({len(encounters)} found)"),
+                table
+            ])
+        
+        complaint_data = {
+            "branch_id": branch_id,
+            "athlete_id": athlete_id,
+            "complaint_id": complaint_id,
+            "encounters_count": len(encounters) if encounters else 0
+        }
+        
+        return content, complaint_data
+    
+    except Exception as e:
+        print(f"Error displaying encounters: {e}")
+        import traceback
+        traceback.print_exc()
+        alert = dbc.Alert([
+            html.Div("Error loading encounters:"),
+            html.Pre(str(e))
+        ], color="danger")
+        return alert, {}
 
 # ───────────────────────── Training tab callbacks ─────────────────────────
 td.register_callbacks(app)
