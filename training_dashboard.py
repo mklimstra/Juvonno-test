@@ -1030,21 +1030,34 @@ def fetch_customer_complaints(customer_id: int) -> List[Dict]:
 @functools.lru_cache(maxsize=64)
 def get_athletes_for_branch(branch_id: int) -> List[Dict]:
     """
-    Fetch athletes for a branch using GET /branches/{branchId}/customers.
-    Results are LRU-cached per branch.
+    Fetch athletes using GET /branches/{branchId}/customers?page=N&results=50
+    as defined in the Juvonno API 2.4.8 spec.
     """
     athletes = []
+    seen: set[int] = set()
+    page = 1
     try:
-        rows = _fetch_all_rows(f"branches/{branch_id}/customers", {}, page_size=100, max_pages=500)
-        for c in rows:
-            if not isinstance(c, dict) or c.get("id") is None:
-                continue
-            cid = int(c["id"])
-            first = (c.get("first_name") or "").strip()
-            last  = (c.get("last_name") or "").strip()
-            name  = f"{first} {last}".strip() or c.get("name", f"Athlete {cid}")
-            athletes.append({"id": cid, "label": name, "value": cid})
-        print(f"  Branch {branch_id}: {len(athletes)} athletes")
+        while True:
+            js = _get(f"branches/{branch_id}/customers", page=page, results=50)
+            rows = _extract_rows(js)
+            if not rows:
+                break
+            for c in rows:
+                if not isinstance(c, dict) or c.get("id") is None:
+                    continue
+                cid = int(c["id"])
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                first = (c.get("first_name") or "").strip()
+                last  = (c.get("last_name") or "").strip()
+                name  = f"{first} {last}".strip() or c.get("name", f"Athlete {cid}")
+                athletes.append({"id": cid, "label": name, "value": cid})
+            # stop if fewer results than requested (last page)
+            if len(rows) < 50:
+                break
+            page += 1
+        print(f"  Branch {branch_id}: {len(athletes)} athletes ({page} page(s))")
     except Exception as e:
         print(f"  ERROR loading athletes for branch {branch_id}: {e}")
 
