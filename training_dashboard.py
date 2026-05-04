@@ -1030,38 +1030,71 @@ def fetch_customer_complaints(customer_id: int) -> List[Dict]:
 @functools.lru_cache(maxsize=64)
 def get_athletes_for_branch(branch_id: int) -> List[Dict]:
     """
-    Fetch athletes using GET /branches/{branchId}/customers?page=N&results=50
-    as defined in the Juvonno API 2.4.8 spec.
+    Probe multiple URL/param variations to find which one the Juvonno API
+    accepts for fetching customers belonging to a branch. Logs every attempt
+    so the working (or failing) URL is visible in the server log.
     """
-    athletes = []
-    seen: set[int] = set()
-    page = 1
-    try:
-        while True:
-            js = _get(f"branches/{branch_id}/customers", page=page, results=50)
-            rows = _extract_rows(js)
-            if not rows:
-                break
-            for c in rows:
-                if not isinstance(c, dict) or c.get("id") is None:
-                    continue
-                cid = int(c["id"])
-                if cid in seen:
-                    continue
-                seen.add(cid)
-                first = (c.get("first_name") or "").strip()
-                last  = (c.get("last_name") or "").strip()
-                name  = f"{first} {last}".strip() or c.get("name", f"Athlete {cid}")
-                athletes.append({"id": cid, "label": name, "value": cid})
-            # stop if fewer results than requested (last page)
-            if len(rows) < 50:
-                break
-            page += 1
-        print(f"  Branch {branch_id}: {len(athletes)} athletes ({page} page(s))")
-    except Exception as e:
-        print(f"  ERROR loading athletes for branch {branch_id}: {e}")
+    candidates = [
+        # path                                    extra params
+        (f"branches/{branch_id}/customers",       {"page": 1, "count": 50}),
+        (f"branches/{branch_id}/customers",       {"page": 1, "results": 50}),
+        (f"branches/{branch_id}/customers",       {"page": 1, "per_page": 50}),
+        (f"branches/{branch_id}/customers",       {"page": 1, "limit": 50}),
+        (f"branch/{branch_id}/customers",         {"page": 1, "count": 50}),
+        (f"clinics/{branch_id}/customers",        {"page": 1, "count": 50}),
+        (f"clinics/{branch_id}/customers",        {"page": 1, "results": 50}),
+        (f"customers/list",                       {"page": 1, "count": 50, "clinic_id": branch_id}),
+        (f"customers/list",                       {"page": 1, "count": 50, "branch_id": branch_id}),
+    ]
 
-    return sorted(athletes, key=lambda x: (x["label"].lower(), x["id"]))
+    for path, params in candidates:
+        url_preview = f"{BASE}/{path}?" + "&".join(f"{k}={v}" for k, v in params.items())
+        try:
+            js = _get(path, **params)
+            rows = _extract_rows(js)
+            print(f"  ✓ WORKED: {url_preview}  → {type(js).__name__}, {len(rows)} rows, keys={list(js.keys()) if isinstance(js, dict) else 'n/a'}")
+            if not rows:
+                print(f"    (no rows extracted — raw response: {str(js)[:300]})")
+                continue  # try next candidate even if rows empty
+            # success — paginate and collect all
+            athletes = []
+            seen: set[int] = set()
+
+            def _collect(row_list):
+                for c in row_list:
+                    if not isinstance(c, dict) or c.get("id") is None:
+                        continue
+                    cid = int(c["id"])
+                    if cid in seen:
+                        continue
+                    seen.add(cid)
+                    first = (c.get("first_name") or "").strip()
+                    last  = (c.get("last_name") or "").strip()
+                    name  = f"{first} {last}".strip() or c.get("name", f"Athlete {cid}")
+                    athletes.append({"id": cid, "label": name, "value": cid})
+
+            _collect(rows)
+            page = 2
+            page_param = "results" if "results" in params else "count" if "count" in params else "per_page" if "per_page" in params else "limit"
+            page_size = params.get("results") or params.get("count") or params.get("per_page") or params.get("limit") or 50
+            while len(rows) >= page_size:
+                next_params = {**params, "page": page}
+                js2 = _get(path, **next_params)
+                rows = _extract_rows(js2)
+                if not rows:
+                    break
+                _collect(rows)
+                page += 1
+
+            print(f"  Branch {branch_id}: {len(athletes)} athletes loaded")
+            return sorted(athletes, key=lambda x: (x["label"].lower(), x["id"]))
+
+        except Exception as e:
+            print(f"  ✗ FAILED: {url_preview}  → {e}")
+
+    # all probes failed — return empty
+    print(f"  All probes failed for branch {branch_id}. Check logs above.")
+    return []
 
 @functools.lru_cache(maxsize=256)
 def get_encounters_for_complaint(complaint_id: int, customer_id: int) -> List[Dict]:
