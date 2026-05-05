@@ -1028,13 +1028,17 @@ def get_athletes_for_branch(branch_id: int) -> List[Dict]:
     """
     candidates = [
         # path                                    extra params
+        (f"branches/{branch_id}/customers",       {"page": 1, "count": 50, "include": "groups,clinic"}),
         (f"branches/{branch_id}/customers",       {"page": 1, "count": 50}),
+        (f"branches/{branch_id}/customers",       {"page": 1, "results": 50, "include": "groups,clinic"}),
         (f"branches/{branch_id}/customers",       {"page": 1, "results": 50}),
         (f"branches/{branch_id}/customers",       {"page": 1, "per_page": 50}),
         (f"branches/{branch_id}/customers",       {"page": 1, "limit": 50}),
         (f"branch/{branch_id}/customers",         {"page": 1, "count": 50}),
+        (f"clinics/{branch_id}/customers",        {"page": 1, "count": 50, "include": "groups,clinic"}),
         (f"clinics/{branch_id}/customers",        {"page": 1, "count": 50}),
         (f"clinics/{branch_id}/customers",        {"page": 1, "results": 50}),
+        (f"customers/list",                       {"page": 1, "count": 50, "clinic_id": branch_id, "include": "groups,clinic"}),
         (f"customers/list",                       {"page": 1, "count": 50, "clinic_id": branch_id}),
         (f"customers/list",                       {"page": 1, "count": 50, "branch_id": branch_id}),
     ]
@@ -1064,7 +1068,7 @@ def get_athletes_for_branch(branch_id: int) -> List[Dict]:
                     last  = (c.get("last_name") or "").strip()
                     name  = f"{first} {last}".strip() or c.get("name", f"Athlete {cid}")
                     groups = _group_names_from_customer(c)
-                    athletes.append({"id": cid, "label": name, "value": cid, "groups": groups})
+                    athletes.append({"id": cid, "label": name, "value": cid, "groups": groups, "_raw": c})
 
             _collect(rows)
             page = 2
@@ -1078,6 +1082,29 @@ def get_athletes_for_branch(branch_id: int) -> List[Dict]:
                     break
                 _collect(rows)
                 page += 1
+
+            # Enrich athletes whose groups are still empty by fetching customer detail.
+            # fetch_customer_detail is LRU-cached so repeat calls are free.
+            needs_enrich = [a for a in athletes if not a["groups"]]
+            print(f"  Branch {branch_id}: enriching {len(needs_enrich)}/{len(athletes)} athletes with customer detail for groups...")
+            for a in needs_enrich:
+                try:
+                    detail = fetch_customer_detail(a["id"])
+                    if isinstance(detail, dict) and detail:
+                        # merge raw + detail and re-extract groups
+                        merged = dict(a["_raw"])
+                        merged.update(detail)
+                        groups = _group_names_from_customer(merged)
+                        if not groups:
+                            # also try the detail dict alone (some APIs wrap differently)
+                            groups = _group_names_from_customer(detail)
+                        a["groups"] = groups
+                except Exception as ge:
+                    print(f"    group enrich for {a['id']}: {ge}")
+
+            # Strip the internal _raw key before returning
+            for a in athletes:
+                a.pop("_raw", None)
 
             print(f"  Branch {branch_id}: {len(athletes)} athletes loaded")
             return sorted(athletes, key=lambda x: (x["label"].lower(), x["id"]))
