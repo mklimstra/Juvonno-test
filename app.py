@@ -786,9 +786,7 @@ def t1_view_encounters(n_clicks, branch_id, athlete_id, complaint_id):
         else:
             def _enc_date(enc):
                 raw = enc.get("chart_date") or enc.get("date") or ""
-                if raw:
-                    return raw.split("T")[0]
-                return "—"
+                return raw.split("T")[0] if raw else "—"
 
             def _enc_type(enc):
                 try:
@@ -796,14 +794,28 @@ def t1_view_encounters(n_clicks, branch_id, athlete_id, complaint_id):
                 except (KeyError, IndexError, TypeError):
                     return enc.get("type") or enc.get("encounter_type") or "—"
 
-            def _enc_status(enc):
-                return td.extract_training_status(enc) or "—"
+            def _enc_fields_summary(enc):
+                try:
+                    fields = enc["data"][0]["fields"]
+                    parts = []
+                    for f in fields:
+                        if not f.get("id", "").startswith("Id_select"):
+                            continue
+                        val = (f.get("value") or "").strip()
+                        if not val or val.startswith("-----"):
+                            continue
+                        name = (f.get("name") or "").strip()
+                        parts.append(f"{name}: {val}" if name else val)
+                    return "; ".join(parts) if parts else "—"
+                except (KeyError, IndexError, TypeError):
+                    return "—"
 
             rows = [
                 {
                     "Date": _enc_date(enc),
-                    "Type": _enc_type(enc),
-                    "Training Status": _enc_status(enc),
+                    "Form": _enc_type(enc),
+                    "Training Status": td.extract_training_status(enc) or "—",
+                    "Fields": _enc_fields_summary(enc),
                 }
                 for enc in sorted(encounters, key=lambda e: _enc_date(e))
             ]
@@ -812,14 +824,18 @@ def t1_view_encounters(n_clicks, branch_id, athlete_id, complaint_id):
                 data=rows,
                 columns=[
                     {"name": "Date", "id": "Date"},
-                    {"name": "Type", "id": "Type"},
+                    {"name": "Form", "id": "Form"},
                     {"name": "Training Status", "id": "Training Status"},
+                    {"name": "Fields", "id": "Fields"},
                 ],
-                style_table={"overflowX":"auto"},
-                style_header={"fontWeight":"600","backgroundColor":"#f8f9fa"},
-                style_cell={"padding":"9px","fontSize":14,"textAlign":"left"},
-                style_data={"borderBottom":"1px solid #eceff4"},
-                style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
+                style_table={"overflowX": "auto"},
+                style_header={"fontWeight": "600", "backgroundColor": "#f8f9fa"},
+                style_cell={
+                    "padding": "9px", "fontSize": 14, "textAlign": "left",
+                    "whiteSpace": "normal", "maxWidth": "500px",
+                },
+                style_data={"borderBottom": "1px solid #eceff4"},
+                style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#fbfbfd"}],
             )
             content = html.Div([
                 html.H6(f"Encounters for selected complaint ({len(encounters)} found)"),

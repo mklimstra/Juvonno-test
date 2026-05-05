@@ -824,14 +824,12 @@ FLAGS = [{}, {"include": "fields"}, {"include": "answers"}, {"full": 1}]
 
 @functools.lru_cache(maxsize=1024)
 def fetch_encounter(eid: int) -> Dict:
-    for root in (f"encounters/{eid}", f"encounters/charts/{eid}", f"encounters/intakes/{eid}"):
-        for f in FLAGS:
-            try:
-                js = _get(root, **f)
-                return js.get("encounter", js) if isinstance(js, dict) else js
-            except requests.HTTPError as e:
-                if e.response.status_code in (400, 404): continue
-                raise
+    try:
+        js = _get(f"encounters/{eid}")
+        if isinstance(js, dict):
+            return js.get("encounter", js)
+    except Exception as e:
+        print(f"  fetch_encounter({eid}): {e}")
     return {}
 
 def extract_training_status(enc_payload: Union[Dict, List]) -> str:
@@ -1090,7 +1088,6 @@ def get_athletes_for_branch(branch_id: int) -> List[Dict]:
     print(f"  All probes failed for branch {branch_id}. Check logs above.")
     return []
 
-@functools.lru_cache(maxsize=256)
 def get_encounters_for_complaint(complaint_id: int, customer_id: int) -> List[Dict]:
     """
     Fetch all encounters for a complaint via GET /complaints/{id}/encounters,
