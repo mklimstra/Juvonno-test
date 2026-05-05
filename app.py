@@ -784,25 +784,40 @@ def t1_view_encounters(n_clicks, branch_id, athlete_id, complaint_id):
         if not encounters:
             content = dbc.Alert("No encounters found for this complaint.", color="info")
         else:
-            rows = []
-            for enc in encounters:
-                rows.append({
-                    "Date": enc.get("date") or enc.get("Date") or "—",
-                    "Type": enc.get("type") or enc.get("encounter_type") or "—",
-                    "Notes": (enc.get("notes") or enc.get("Notes") or "")[:100],
-                    "_data": str(enc)
-                })
-            
+            def _enc_date(enc):
+                raw = enc.get("chart_date") or enc.get("date") or ""
+                if raw:
+                    return raw.split("T")[0]
+                return "—"
+
+            def _enc_type(enc):
+                try:
+                    return enc["data"][0]["template"]["tab_name"]
+                except (KeyError, IndexError, TypeError):
+                    return enc.get("type") or enc.get("encounter_type") or "—"
+
+            def _enc_status(enc):
+                return td.extract_training_status(enc) or "—"
+
+            rows = [
+                {
+                    "Date": _enc_date(enc),
+                    "Type": _enc_type(enc),
+                    "Training Status": _enc_status(enc),
+                }
+                for enc in sorted(encounters, key=lambda e: _enc_date(e))
+            ]
+
             table = dash_table.DataTable(
                 data=rows,
                 columns=[
                     {"name": "Date", "id": "Date"},
                     {"name": "Type", "id": "Type"},
-                    {"name": "Notes", "id": "Notes"},
+                    {"name": "Training Status", "id": "Training Status"},
                 ],
                 style_table={"overflowX":"auto"},
                 style_header={"fontWeight":"600","backgroundColor":"#f8f9fa"},
-                style_cell={"padding":"9px","fontSize":14},
+                style_cell={"padding":"9px","fontSize":14,"textAlign":"left"},
                 style_data={"borderBottom":"1px solid #eceff4"},
                 style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
             )

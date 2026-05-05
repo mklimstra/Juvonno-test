@@ -1093,88 +1093,33 @@ def get_athletes_for_branch(branch_id: int) -> List[Dict]:
 @functools.lru_cache(maxsize=256)
 def get_encounters_for_complaint(complaint_id: int, customer_id: int) -> List[Dict]:
     """
-    Get encounters related to a specific complaint for a customer.
-    Returns list of encounters with relevant details.
+    Fetch all encounters for a complaint via GET /complaints/{id}/encounters,
+    which returns an EncounterIDList (integer IDs). Each ID is then fetched
+    individually via GET /encounters/{id}.
     """
-    encounters = []
+    encounters: List[Dict] = []
     try:
-        # Try to fetch encounters for this customer's complaint
-        # First, get the complaint to understand its structure
-        complaints = fetch_customer_complaints(customer_id)
-        target_complaint = None
-        
-        for comp in complaints:
-            comp_id = comp.get("Id") or comp.get("id")
-            if comp_id == complaint_id:
-                target_complaint = comp
+        page = 1
+        while True:
+            js = _get(f"complaints/{complaint_id}/encounters", page=page, results=100)
+            id_block = js.get("list") if isinstance(js, dict) else None
+            if not isinstance(id_block, list) or not id_block:
                 break
-        
-        if target_complaint:
-            # 1) GET /complaints/{complaintId}/encounters → EncounterIDList (list of integer IDs)
-            try:
-                page = 1
-                while True:
-                    js = _get(f"complaints/{complaint_id}/encounters", page=page, results=100)
-                    id_block = js.get("list") if isinstance(js, dict) else None
-                    if not isinstance(id_block, list) or not id_block:
-                        break
-                    for eid in id_block:
-                        try:
-                            enc = fetch_encounter(int(eid))
-                            if enc:
-                                encounters.append(enc)
-                        except Exception:
-                            pass
-                    total = js.get("total")
-                    if total is not None and len(encounters) >= total:
-                        break
-                    if len(id_block) < 100:
-                        break
-                    page += 1
-            except Exception:
-                pass
-
-            # 2) Try to get from appointments that have this complaint
-            try:
-                appts_for_complainant = CID_TO_APPTS.get(customer_id, [])
-                for appt in appts_for_complainant:
-                    appt_id = appt.get("id")
-                    # Check if this appointment has the target complaint
-                    appt_complaints = list_complaints_for_appt(appt_id)
-                    for comp in appt_complaints:
-                        if (comp.get("Id") or comp.get("id")) == complaint_id:
-                            # This appointment has our complaint, get its encounters
-                            eids = encounter_ids_for_appt(appt_id)
-                            for eid in eids:
-                                try:
-                                    enc = fetch_encounter(eid)
-                                    if enc:
-                                        encounters.append(enc)
-                                except Exception:
-                                    pass
-            except Exception:
-                pass
-            
-            # 3) If no encounters found yet, get all encounters for customer
-            if not encounters:
+            for eid in id_block:
                 try:
-                    for appt in CID_TO_APPTS.get(customer_id, []):
-                        eids = encounter_ids_for_appt(appt.get("id"))
-                        for eid in eids:
-                            try:
-                                enc = fetch_encounter(eid)
-                                if enc:
-                                    encounters.append(enc)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-    
+                    enc = fetch_encounter(int(eid))
+                    if enc:
+                        encounters.append(enc)
+                except Exception as e:
+                    print(f"  fetch_encounter({eid}): {e}")
+            total = js.get("total")
+            if total is not None and len(encounters) >= total:
+                break
+            if len(id_block) < 100:
+                break
+            page += 1
     except Exception as e:
-        print(f"Error loading encounters for complaint {complaint_id}: {e}")
-        import traceback
-        traceback.print_exc()
-    
+        print(f"  get_encounters_for_complaint({complaint_id}): {e}")
     return encounters
 
 # ────────── Pastel palette (table + calendar) ──────────
