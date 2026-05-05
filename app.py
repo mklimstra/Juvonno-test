@@ -742,13 +742,12 @@ def t1_load_complaints(athlete_id):
     
     try:
         complaints = td.fetch_customer_complaints(int(athlete_id))
-        options = [
-            {
-                "label": c.get("Title") or c.get("title") or c.get("name") or f"Complaint {c.get('Id', c.get('id'))}",
-                "value": c.get("Id") or c.get("id")
-            }
-            for c in complaints
-        ]
+        options = []
+        for c in complaints:
+            title = c.get("Title") or c.get("title") or c.get("name") or f"Complaint {c.get('Id', c.get('id'))}"
+            lat   = (c.get("Laterality") or "").strip()
+            label = f"{title} ({lat})" if lat else title
+            options.append({"label": label, "value": c.get("Id") or c.get("id")})
         return options, False, None
     except Exception as e:
         print(f"Error loading complaints: {e}")

@@ -963,8 +963,13 @@ def _norm_complaint_fields(rec: Dict) -> Dict:
             priority = str(priority or priority2).strip()
             status   = str(status or status2).strip()
 
+    laterality = (rec.get("laterality") or "").strip()
+    if laterality in ("- Select -", "None", "N/A"):
+        laterality = ""
+
     return {"Id": cid, "Title": title, "Onset": _fmt_date(onset),
-            "Priority": str(priority).strip(), "Status": (str(status).strip() or "—")}
+            "Priority": str(priority).strip(), "Status": (str(status).strip() or "—"),
+            "Laterality": laterality}
 
 @functools.lru_cache(maxsize=512)
 def fetch_customer_complaints(customer_id: int) -> List[Dict]:
@@ -985,8 +990,8 @@ def fetch_customer_complaints(customer_id: int) -> List[Dict]:
             if len(block) < 100:
                 break
             page += 1
-    except requests.HTTPError:
-        pass
+    except Exception as e:
+        print(f"  fetch_customer_complaints({customer_id}): {e}")
 
     # Appointment-level + inline
     for ap in CID_TO_APPTS.get(customer_id, []):
