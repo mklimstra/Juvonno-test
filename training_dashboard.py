@@ -991,7 +991,7 @@ def fetch_customer_complaints(customer_id: int) -> List[Dict]:
     except Exception as e:
         print(f"  fetch_customer_complaints({customer_id}): {e}")
 
-    # Appointment-level + inline
+    # Appointment-level + inline (only add if complaint API unavailable / empty)
     for ap in CID_TO_APPTS.get(customer_id, []):
         for rec in list_complaints_for_appt(ap.get("id")):
             out.append(rec)
@@ -1002,15 +1002,43 @@ def fetch_customer_complaints(customer_id: int) -> List[Dict]:
 
     # Normalize + dedupe
     normed = [_norm_complaint_fields(r) for r in out if isinstance(r, dict)]
-    dedup: Dict[Tuple, Dict] = {}
+
+    # Step 1: Group by complaint ID — same ID is definitively the same complaint.
+    by_id: Dict[int, Dict] = {}
+    no_id: List[Dict] = []
     for r in normed:
-        key = (r.get("Id") or (r.get("Title") or "").casefold(),)
-        if key in dedup:
-            prev = dedup[key]
-            for f in ("Priority", "Status", "Onset", "Title"):
-                if (not prev.get(f)) and r.get(f): prev[f] = r[f]
+        rid = r.get("Id")
+        if rid is not None:
+            try:
+                rid_int = int(rid)
+                if rid_int in by_id:
+                    # Enrich existing record with any missing fields
+                    prev = by_id[rid_int]
+                    for f in ("Priority", "Status", "Onset", "Title", "Laterality"):
+                        if not prev.get(f) and r.get(f):
+                            prev[f] = r[f]
+                else:
+                    by_id[rid_int] = r
+            except (TypeError, ValueError):
+                no_id.append(r)
         else:
-            dedup[key] = r
+            no_id.append(r)
+
+    # Step 2: For ID-less records, dedup by (normalized_title, onset).
+    # Skip if already covered by an ID-keyed record with the same title+onset.
+    seen_title_onset: set = {
+        ((v.get("Title") or "").casefold().strip(), v.get("Onset") or "")
+        for v in by_id.values()
+    }
+    dedup: Dict = dict(by_id)
+    for r in no_id:
+        title_norm = (r.get("Title") or "").casefold().strip()
+        if not title_norm:
+            continue
+        tk = (title_norm, r.get("Onset") or "")
+        if tk not in seen_title_onset:
+            seen_title_onset.add(tk)
+            dedup[f"noid_{tk}"] = r
 
     def _sort_key(d):
         try: return (0, pd.to_datetime(d["Onset"]))
