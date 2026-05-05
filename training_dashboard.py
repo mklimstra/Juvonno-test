@@ -1063,7 +1063,8 @@ def get_athletes_for_branch(branch_id: int) -> List[Dict]:
                     first = (c.get("first_name") or "").strip()
                     last  = (c.get("last_name") or "").strip()
                     name  = f"{first} {last}".strip() or c.get("name", f"Athlete {cid}")
-                    athletes.append({"id": cid, "label": name, "value": cid})
+                    groups = _group_names_from_customer(c)
+                    athletes.append({"id": cid, "label": name, "value": cid, "groups": groups})
 
             _collect(rows)
             page = 2

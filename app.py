@@ -183,6 +183,31 @@ STATUS_CHOICES = [
     "No Participation due to Illness/Injury",
 ]
 
+# ───────────────────────── Encounter field helpers ─────────────────────────
+def _enc_date(enc: dict) -> str:
+    raw = enc.get("chart_date") or enc.get("date") or ""
+    return raw.split("T")[0] if raw else "—"
+
+def _enc_type(enc: dict) -> str:
+    try:
+        return enc["data"][0]["template"]["tab_name"]
+    except (KeyError, IndexError, TypeError):
+        return enc.get("type") or enc.get("encounter_type") or "—"
+
+def _enc_fields_all(enc: dict) -> dict:
+    """Return all non-empty named fields as {name: value}."""
+    try:
+        fields = enc["data"][0]["fields"]
+        result = {}
+        for f in fields:
+            name = (f.get("name") or f.get("label") or "").strip()
+            val = (f.get("value") or "").strip()
+            if name and val and not val.startswith("-----") and not val.startswith("---"):
+                result[name] = val
+        return result
+    except (KeyError, IndexError, TypeError):
+        return {}
+
 # ───────────────────────── Cache current status per athlete ─────────────────────────
 # ───────────────────────── Cache current status per athlete ─────────────────────────
 @functools.lru_cache(maxsize=2048)
@@ -236,6 +261,15 @@ def tab1_layout():
                         ),
                     ], md=4),
                     dbc.Col([
+                        html.Label("Group", className="fw-bold"),
+                        dcc.Dropdown(
+                            id="t1-group-dd",
+                            placeholder="Filter by group (optional)…",
+                            clearable=True,
+                            disabled=True,
+                        ),
+                    ], md=4),
+                    dbc.Col([
                         html.Label("Athlete", className="fw-bold"),
                         dcc.Loading(
                             dcc.Dropdown(
@@ -270,12 +304,18 @@ def tab1_layout():
         # Encounters
         dbc.Card([
             dbc.CardHeader(html.Span(id="t1-encounters-header", children="Encounters")),
-            dbc.CardBody(
-                dcc.Loading(
+            dbc.CardBody([
+                dcc.Loading([
+                    dcc.Dropdown(
+                        id="t1-form-dd",
+                        placeholder="Filter by form…",
+                        clearable=True,
+                        disabled=True,
+                        style={"maxWidth": "420px", "marginBottom": "10px"},
+                    ),
                     html.Div(id="t1-encounters-container"),
-                    type="circle",
-                )
-            ),
+                ], type="circle"),
+            ]),
         ], className="mb-3"),
 
         dbc.Alert(id="t1-msg", is_open=False, color="danger"),
@@ -352,6 +392,8 @@ def tab1_layout():
         dcc.Store(id="t1-selected-branch", data=None),
         dcc.Store(id="t1-selected-athlete", data=None),
         dcc.Store(id="t1-selected-complaint", data=None),
+        dcc.Store(id="t1-all-athletes-store", data=[]),
+        dcc.Store(id="t1-encounters-store", data=[]),
     ], fluid=True)
 
 # ───────────────────────── Tab 2 (Training Dashboard) ─────────────────────────
@@ -719,27 +761,56 @@ def _build_complaint_pills(complaints, active_id=None):
     return pills
 
 # ───────────────────────── Cascading Callbacks ─────────────────────────
-# Step 1: Load athletes when branch is selected
+# Step 1: Load athletes + group options when branch is selected
 @app.callback(
-    Output("t1-athlete-dd", "options"),
-    Output("t1-athlete-dd", "disabled"),
-    Output("t1-athlete-dd", "value"),
+    Output("t1-all-athletes-store", "data"),
+    Output("t1-group-dd", "options"),
+    Output("t1-group-dd", "disabled"),
+    Output("t1-group-dd", "value"),
     Output("t1-cascade-status", "children"),
     Input("t1-branch-dd", "value"),
     prevent_initial_call=True
 )
 def t1_load_athletes(branch_id):
     if not branch_id:
-        return [], True, None, "Select a branch to load athletes."
+        return [], [], True, None, "Select a branch to load athletes."
     try:
         athletes = td.get_athletes_for_branch(int(branch_id))
-        options = [{"label": a["label"], "value": a["id"]} for a in athletes]
-        status_msg = f"{len(options)} athlete(s) in this branch. Select one to view complaints." if options else "No athletes found for this branch."
-        return options, False, None, status_msg
+        all_groups: set = set()
+        for a in athletes:
+            for g in (a.get("groups") or []):
+                if g:
+                    all_groups.add(g)
+        group_opts = [{"label": g.title(), "value": g} for g in sorted(all_groups)]
+        status_msg = f"{len(athletes)} athlete(s) in this branch."
+        if group_opts:
+            status_msg += f" {len(group_opts)} group(s) available — select a group to filter."
+        else:
+            status_msg += " Select an athlete to view complaints."
+        return athletes, group_opts, not bool(group_opts), None, status_msg
     except Exception as e:
         print(f"Error loading athletes: {e}")
         traceback.print_exc()
-        return [], True, None, f"Error: {str(e)}"
+        return [], [], True, None, f"Error: {str(e)}"
+
+# Step 1b: Filter athlete dropdown by group selection
+@app.callback(
+    Output("t1-athlete-dd", "options"),
+    Output("t1-athlete-dd", "disabled"),
+    Output("t1-athlete-dd", "value"),
+    Input("t1-all-athletes-store", "data"),
+    Input("t1-group-dd", "value"),
+    prevent_initial_call=True,
+)
+def t1_filter_athletes(athletes_data, group_filter):
+    if not athletes_data:
+        return [], True, None
+    if group_filter:
+        filtered = [a for a in athletes_data if group_filter in (a.get("groups") or [])]
+    else:
+        filtered = athletes_data
+    opts = [{"label": a["label"], "value": a["id"]} for a in filtered]
+    return opts, False, None
 
 # Step 2: Render complaint pills when athlete is selected
 @app.callback(
@@ -782,18 +853,21 @@ def t1_pill_clicked(n_clicks_list, athlete_id):
     except Exception:
         raise PreventUpdate
 
-# Step 4: Load encounters automatically when active complaint changes
+# Step 4: Load encounters → store raw data + populate form filter
 @app.callback(
-    Output("t1-encounters-container", "children"),
+    Output("t1-encounters-store", "data"),
     Output("t1-encounters-header", "children"),
     Output("t1-selected-complaint-data", "data"),
+    Output("t1-form-dd", "options"),
+    Output("t1-form-dd", "value"),
+    Output("t1-form-dd", "disabled"),
     Input("t1-active-complaint-id", "data"),
     State("t1-athlete-dd", "value"),
     prevent_initial_call=True,
 )
 def t1_load_encounters(complaint_id, athlete_id):
     if not complaint_id or not athlete_id:
-        return html.Div(), "Encounters", {}
+        return [], "Encounters", {}, [], None, True
     try:
         encounters = td.get_encounters_for_complaint(int(complaint_id), int(athlete_id))
 
@@ -811,71 +885,111 @@ def t1_load_encounters(complaint_id, athlete_id):
             pass
 
         if not encounters:
-            return dbc.Alert("No encounters found for this complaint.", color="info"), header, {}
+            return [], header, {}, [], None, True
 
-        def _enc_date(enc):
-            raw = enc.get("chart_date") or enc.get("date") or ""
-            return raw.split("T")[0] if raw else "—"
+        # Serialize encounters for store
+        enc_data = []
+        for enc in sorted(encounters, key=lambda e: _enc_date(e)):
+            enc_data.append({
+                "date": _enc_date(enc),
+                "form": _enc_type(enc),
+                "training_status": td.extract_training_status(enc) or "—",
+                "fields": _enc_fields_all(enc),
+            })
 
-        def _enc_type(enc):
-            try:
-                return enc["data"][0]["template"]["tab_name"]
-            except (KeyError, IndexError, TypeError):
-                return enc.get("type") or enc.get("encounter_type") or "—"
-
-        def _enc_fields_summary(enc):
-            try:
-                fields = enc["data"][0]["fields"]
-                parts = []
-                for f in fields:
-                    if not f.get("id", "").startswith("Id_select"):
-                        continue
-                    val = (f.get("value") or "").strip()
-                    if not val or val.startswith("-----"):
-                        continue
-                    name = (f.get("name") or "").strip()
-                    parts.append(f"{name}: {val}" if name else val)
-                return "; ".join(parts) if parts else "—"
-            except (KeyError, IndexError, TypeError):
-                return "—"
-
-        rows = [
-            {
-                "Date": _enc_date(enc),
-                "Form": _enc_type(enc),
-                "Training Status": td.extract_training_status(enc) or "—",
-                "Fields": _enc_fields_summary(enc),
-            }
-            for enc in sorted(encounters, key=lambda e: _enc_date(e))
+        # Form options
+        forms = sorted({e["form"] for e in enc_data if e["form"] and e["form"] != "—"})
+        form_opts = [{"label": "All Forms", "value": "__ALL__"}] + [
+            {"label": f, "value": f} for f in forms
         ]
 
-        table = dash_table.DataTable(
-            data=rows,
-            columns=[
-                {"name": "Date", "id": "Date"},
-                {"name": "Form", "id": "Form"},
-                {"name": "Training Status", "id": "Training Status"},
-                {"name": "Fields", "id": "Fields"},
-            ],
-            style_table={"overflowX": "auto"},
-            style_header={"fontWeight": "600", "backgroundColor": "#f8f9fa"},
-            style_cell={
-                "padding": "9px", "fontSize": 14, "textAlign": "left",
-                "whiteSpace": "normal", "maxWidth": "500px",
-            },
-            style_data={"borderBottom": "1px solid #eceff4"},
-            style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#fbfbfd"}],
+        return (
+            enc_data, header,
+            {"complaint_id": complaint_id, "athlete_id": athlete_id, "encounters_count": len(encounters)},
+            form_opts, "__ALL__", False,
         )
-        content = html.Div([
-            html.H6(f"{len(encounters)} encounter(s) found"),
-            table
-        ])
-        return content, header, {"complaint_id": complaint_id, "athlete_id": athlete_id, "encounters_count": len(encounters)}
 
     except Exception as e:
         print(f"Error loading encounters: {e}")
         traceback.print_exc()
-        return dbc.Alert([html.Div("Error loading encounters:"), html.Pre(str(e))], color="danger"), "Encounters", {}
+        return [], "Encounters", {}, [], None, True
+
+# Step 4b: Render encounter table from store, filtered by form
+@app.callback(
+    Output("t1-encounters-container", "children"),
+    Input("t1-encounters-store", "data"),
+    Input("t1-form-dd", "value"),
+    prevent_initial_call=True,
+)
+def t1_render_encounters_table(enc_data, form_filter):
+    if not enc_data:
+        return html.Div()
+
+    if form_filter and form_filter != "__ALL__":
+        filtered = [e for e in enc_data if e.get("form") == form_filter]
+    else:
+        filtered = enc_data
+        form_filter = None
+
+    if not filtered:
+        return dbc.Alert("No encounters found for the selected form.", color="info")
+
+    if form_filter:
+        # Collect all field names for this specific form
+        all_field_names: set = set()
+        for e in filtered:
+            all_field_names.update(e.get("fields", {}).keys())
+        field_cols = sorted(all_field_names)
+
+        rows = []
+        for e in filtered:
+            row = {
+                "Date": e["date"],
+                "Training Status": e["training_status"],
+            }
+            for fc in field_cols:
+                row[fc] = e.get("fields", {}).get(fc, "")
+            rows.append(row)
+
+        columns = (
+            [{"name": "Date", "id": "Date"}, {"name": "Training Status", "id": "Training Status"}]
+            + [{"name": fc, "id": fc} for fc in field_cols]
+        )
+    else:
+        # Default multi-form view
+        rows = []
+        for e in filtered:
+            fields_summary = "; ".join(f"{k}: {v}" for k, v in e.get("fields", {}).items()) or "—"
+            rows.append({
+                "Date": e["date"],
+                "Form": e["form"],
+                "Training Status": e["training_status"],
+                "Fields": fields_summary,
+            })
+        columns = [
+            {"name": "Date", "id": "Date"},
+            {"name": "Form", "id": "Form"},
+            {"name": "Training Status", "id": "Training Status"},
+            {"name": "Fields", "id": "Fields"},
+        ]
+
+    table = dash_table.DataTable(
+        data=rows,
+        columns=columns,
+        style_table={"overflowX": "auto"},
+        style_header={"fontWeight": "600", "backgroundColor": "#f8f9fa"},
+        style_cell={
+            "padding": "9px", "fontSize": 14, "textAlign": "left",
+            "whiteSpace": "normal", "maxWidth": "500px",
+            "fontFamily": "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
+        },
+        style_data={"borderBottom": "1px solid #eceff4"},
+        style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#fbfbfd"}],
+    )
+    return html.Div([
+        html.H6(f"{len(filtered)} encounter(s)"),
+        table,
+    ])
 
 # ───────────────────────── Training tab callbacks ─────────────────────────
 td.register_callbacks(app)
