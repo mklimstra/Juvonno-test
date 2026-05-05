@@ -970,36 +970,25 @@ def _norm_complaint_fields(rec: Dict) -> Dict:
 def fetch_customer_complaints(customer_id: int) -> List[Dict]:
     out: List[Dict] = []
 
-    # 1) Customer-level
-    try:
-        js = _get(f"customers/{customer_id}/complaints", include="full", page=1, count=100)
-        block = js.get("list", js)
-        if isinstance(block, list): out.extend(block)
-        page = 2
-        while True:
-            js2 = _get(f"customers/{customer_id}/complaints", include="full", page=page, count=100)
-            blk = js2.get("list", js2)
-            if not isinstance(blk, list) or not blk: break
-            out.extend(blk)
-            if len(blk) < 100: break
-            page += 1
-    except requests.HTTPError:
-        pass
-
-    # 2) Global search by customer_id
+    # GET /customers/{customerId}/complaints  (page + results per spec)
     try:
         page = 1
         while True:
-            js = _get("complaints/list", customer_id=customer_id, page=page, count=100)
-            block = js.get("list", js)
-            if not isinstance(block, list) or not block: break
+            js = _get(f"customers/{customer_id}/complaints", page=page, results=100)
+            block = js.get("list") if isinstance(js, dict) else None
+            if not isinstance(block, list) or not block:
+                break
             out.extend(block)
-            if len(block) < 100: break
+            total = js.get("total")
+            if total is not None and len(out) >= total:
+                break
+            if len(block) < 100:
+                break
             page += 1
     except requests.HTTPError:
         pass
 
-    # 3) Appointment-level + inline
+    # Appointment-level + inline
     for ap in CID_TO_APPTS.get(customer_id, []):
         for rec in list_complaints_for_appt(ap.get("id")):
             out.append(rec)
@@ -1116,18 +1105,30 @@ def get_encounters_for_complaint(complaint_id: int, customer_id: int) -> List[Di
                 break
         
         if target_complaint:
-            # Try to get encounters linked to this complaint
-            # This might be through appointments, encounters endpoint, or complaint-specific endpoint
-            
-            # 1) Try direct complaint encounters endpoint
+            # 1) GET /complaints/{complaintId}/encounters → EncounterIDList (list of integer IDs)
             try:
-                js = _get(f"complaints/{complaint_id}/encounters", page=1, count=100)
-                block = _extract_rows(js)
-                if isinstance(block, list):
-                    encounters.extend(block)
+                page = 1
+                while True:
+                    js = _get(f"complaints/{complaint_id}/encounters", page=page, results=100)
+                    id_block = js.get("list") if isinstance(js, dict) else None
+                    if not isinstance(id_block, list) or not id_block:
+                        break
+                    for eid in id_block:
+                        try:
+                            enc = fetch_encounter(int(eid))
+                            if enc:
+                                encounters.append(enc)
+                        except Exception:
+                            pass
+                    total = js.get("total")
+                    if total is not None and len(encounters) >= total:
+                        break
+                    if len(id_block) < 100:
+                        break
+                    page += 1
             except Exception:
                 pass
-            
+
             # 2) Try to get from appointments that have this complaint
             try:
                 appts_for_complainant = CID_TO_APPTS.get(customer_id, [])
