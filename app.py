@@ -442,138 +442,6 @@ def enforce_session(_n):
         return no_update
     return BASE_ROOT_URL
 
-# ───────────────────────── Tab 1: Load customers ─────────────────────────
-@app.callback(
-    Output("t1-group-dd", "options"),
-    Output("t1-group-dd", "value"),
-    Input("t1-branch-dd", "value"),
-    State("t1-group-dd", "value"),
-)
-def t1_sync_groups_by_branch(branch_values, selected_groups):
-    try:
-        # Use groups_for_branches for static/cached data to avoid API timeouts
-        groups = td.groups_for_branches(branch_values)
-        opts = [{"label": g.title(), "value": g} for g in groups]
-        selected_groups_norm = [td._norm(g) for g in (selected_groups or [])]
-        allowed_set = {o["value"] for o in opts}
-        pruned = [g for g in selected_groups_norm if g in allowed_set]
-        return opts, pruned
-    except Exception as e:
-        print(f"WARNING: Error syncing groups: {e}")
-        return [], None
-
-
-@app.callback(
-    Output("t1-grid-container", "children"),
-    Output("t1-rows-json", "data"),
-    Output("t1-msg", "children"),
-    Output("t1-msg", "is_open"),
-    Input("t1-load", "n_clicks"),
-    State("t1-branch-dd", "value"),
-    State("t1-group-dd", "value"),
-    prevent_initial_call=True
-)
-def t1_load_customers(n_clicks, branch_values, group_values):
-    try:
-        if not group_values and not branch_values:
-            return no_update, no_update, "Select at least one branch or group.", True
-
-        targets = {td._norm(g) for g in (group_values or [])}
-        branch_targets = {int(v) for v in (branch_values or [])}
-        rows = []
-
-        for cid, cust in td.CUSTOMERS.items():
-            cust_groups = set(td._customer_groups(cid, cust))
-            cust_branch = td._customer_branch(cid, cust)
-
-            if targets and not (targets & cust_groups):
-                continue
-
-            if branch_targets and cust_branch not in branch_targets:
-                continue
-
-            first = (cust.get("first_name") or "").strip()
-            last  = (cust.get("last_name") or "").strip()
-
-            groups_html = " ".join(
-                pill_html(g.title(), color_for_label(g)) for g in sorted(cust_groups)
-            ) if cust_groups else "—"
-
-            current_status = _current_status_for_customer(int(cid))
-            status_color = td.PASTEL_COLOR.get(current_status, "#e6e6e6")
-            status_html = f"{dot_html(status_color)}{html_escape(current_status) if current_status else '—'}" if current_status else "—"
-
-            try:
-                complaints = td.fetch_customer_complaints(cid)
-                complaint_names = [c["Title"] for c in complaints if c.get("Title")]
-                complaints_html = " ".join(
-                    pill_html(t, color_for_label(t), border=BORDER) for t in complaint_names
-                ) if complaint_names else "—"
-            except Exception:
-                complaints_html = "—"
-
-            rows.append({
-                "First Name": first,
-                "Last Name":  last,
-                "Groups": groups_html,
-                "Current Status": status_html,
-                "Complaints": complaints_html,
-                "DOB": cust.get("dob") or cust.get("birthdate") or "—",
-                "Sex": cust.get("sex") or cust.get("gender") or "—",
-                "_cid": cid,
-                "_athlete_label": f"{first} {last}".strip(),
-            })
-
-        if not rows:
-            return html.Div("No athletes in those groups."), [], "", False
-
-        columns = [
-            {"name":"First Name", "id":"First Name"},
-            {"name":"Last Name",  "id":"Last Name"},
-            {"name":"Groups", "id":"Groups", "presentation":"markdown"},
-            {"name":"Current Status", "id":"Current Status", "presentation":"markdown"},
-            {"name":"Complaints", "id":"Complaints", "presentation":"markdown"},
-            {"name":"DOB", "id":"DOB"},
-            {"name":"Sex", "id":"Sex"},
-        ]
-
-        table = dash_table.DataTable(
-            id="t1-athlete-table",
-            data=rows,
-            columns=columns,
-            markdown_options={"html": True},
-            filter_action="native",
-            filter_options={"case": "insensitive"},
-            style_filter={
-                "backgroundColor": "#fafcff",
-                "borderBottom": "1px solid #e6ebf1",
-                "borderTop": "1px solid #e6ebf1",
-                "fontStyle": "italic",
-            },
-            sort_action="native",
-            page_action="none",
-            style_table={"overflowX":"auto", "maxHeight":"240px", "overflowY":"auto"},
-            style_header={"fontWeight":"600","backgroundColor":"#f8f9fa","lineHeight":"22px"},
-            style_cell={"padding":"9px","fontSize":14,"lineHeight":"22px",
-                        "fontFamily":"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
-                        "textAlign":"left"},
-            style_data={"borderBottom":"1px solid #eceff4"},
-            style_data_conditional=[{"if": {"row_index":"odd"}, "backgroundColor":"#fbfbfd"}],
-            row_selectable="single",
-            selected_rows=[0],
-        )
-
-        return table, rows, "", False
-
-    except Exception as e:
-        tb = traceback.format_exc()
-        msg = html.Div([
-            html.Div("Error loading athletes:"),
-            html.Pre(str(e)),
-            html.Details([html.Summary("Traceback"), html.Pre(tb)], open=False)
-        ])
-        return no_update, no_update, msg, True
-
 # ───────────────────────── Tab 1: Toggle status override (and clear when off) ─────────────────────────
 @app.callback(
     Output("t1-status-collapse", "is_open"),
@@ -594,22 +462,25 @@ def toggle_status_override(n, is_open):
     Output("t1-selected-athlete-label", "children"),
     Output("t1-comment-date", "date"),
     Output("t1-status-override", "value", allow_duplicate=True),
-    Input("t1-athlete-table", "selected_rows"),
-    State("t1-rows-json", "data"),
-    prevent_initial_call="initial_duplicate",   # ← add this line
+    Input("t1-athlete-dd", "value"),
+    State("t1-athlete-dd", "options"),
+    prevent_initial_call=True,
 )
-def t1_on_select(selected_rows, rows_json):
-    if not rows_json:
-        raise PreventUpdate
-
+def t1_on_select(athlete_id, athlete_options):
     today = date.today().strftime("%Y-%m-%d")
 
-    if not selected_rows:
+    if not athlete_id:
         return [], None, [], "", today, None
 
-    row = rows_json[selected_rows[0]]
-    cid = int(row["_cid"])
-    label = row["_athlete_label"]
+    cid = int(athlete_id)
+
+    label = ""
+    for opt in (athlete_options or []):
+        if opt.get("value") == athlete_id:
+            label = opt.get("label", "")
+            break
+    if not label:
+        label = f"Athlete {cid}"
 
     try:
         complaints = td.fetch_customer_complaints(cid)
@@ -631,8 +502,8 @@ def t1_on_select(selected_rows, rows_json):
     Output("t1-comment-text", "value", allow_duplicate=True),
     Output("t1-comment-status", "children", allow_duplicate=True),
     Output("t1-status-override", "value", allow_duplicate=True),
-    State("t1-athlete-table", "selected_rows"),
-    State("t1-rows-json", "data"),
+    State("t1-athlete-dd", "value"),
+    State("t1-athlete-dd", "options"),
     State("t1-complaint-dd", "value"),
     State("t1-comment-date", "date"),
     State("t1-comment-text", "value"),
@@ -641,13 +512,20 @@ def t1_on_select(selected_rows, rows_json):
     Input("t1-save-comment", "n_clicks"),
     prevent_initial_call=True,
 )
-def t1_save_comment(selected_rows, rows_json, complaint, date_str, text, status_override, table_data, _n):
-    if not _n or not rows_json or not selected_rows or not date_str or not (text or "").strip():
+def t1_save_comment(athlete_id, athlete_options, complaint, date_str, text, status_override, table_data, _n):
+    if not _n or not athlete_id or not date_str or not (text or "").strip():
         raise PreventUpdate
 
-    row = rows_json[selected_rows[0]]
-    cid = int(row["_cid"])
-    label = row["_athlete_label"]
+    cid = int(athlete_id)
+
+    label = ""
+    for opt in (athlete_options or []):
+        if opt.get("value") == athlete_id:
+            label = opt.get("label", "")
+            break
+    if not label:
+        label = f"Athlete {cid}"
+
     author = _get_signed_in_name()
 
     status_to_use = status_override or _current_status_for_customer(cid)
