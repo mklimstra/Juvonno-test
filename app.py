@@ -7,7 +7,7 @@ import requests
 import pandas as pd
 import dash
 from dash_auth_external import DashAuthExternal
-from dash import Dash, Input, Output, State, html, dcc, dash_table, no_update
+from dash import Dash, Input, Output, State, html, dcc, dash_table, no_update, ALL, ctx
 from dash.exceptions import PreventUpdate
 import dash_bootstrap_components as dbc
 
@@ -221,9 +221,9 @@ def tab1_layout():
     return dbc.Container([
         html.H3("Browse Athlete Data", className="mt-2"),
 
-        # Cascading Selection Section
+        # Selection row
         dbc.Card([
-            dbc.CardHeader("Select Data Path"),
+            dbc.CardHeader("Select Athlete"),
             dbc.CardBody([
                 dbc.Row([
                     dbc.Col([
@@ -233,9 +233,8 @@ def tab1_layout():
                             options=td.BRANCH_OPTS,
                             placeholder="Select a branch…",
                             clearable=True,
-                            style={"width":"100%"}
                         ),
-                    ], md=3),
+                    ], md=4),
                     dbc.Col([
                         html.Label("Athlete", className="fw-bold"),
                         dcc.Loading(
@@ -243,47 +242,46 @@ def tab1_layout():
                                 id="t1-athlete-dd",
                                 placeholder="Select a branch first…",
                                 clearable=True,
-                                style={"width":"100%"},
-                                disabled=True
+                                disabled=True,
                             ),
                             type="circle",
                         ),
-                    ], md=3),
-                    dbc.Col([
-                        html.Label("Complaint", className="fw-bold"),
-                        dcc.Dropdown(
-                            id="t1-complaint-select-dd",
-                            placeholder="Select an athlete first…",
-                            clearable=True,
-                            style={"width":"100%"},
-                            disabled=True
-                        ),
-                    ], md=3),
-                    dbc.Col([
-                        html.Label("&nbsp;", className="fw-bold"),
-                        dbc.Button("View Encounters", id="t1-view-encounters-btn", 
-                                   color="primary", className="w-100", disabled=True),
-                    ], md=3),
+                    ], md=4),
                 ], className="g-2"),
-                
                 html.Div(id="t1-cascade-status", className="mt-2 text-muted small"),
             ])
         ], className="mb-3"),
 
-        # Encounters Display Section
+        # Complaints pills
         dbc.Card([
-            dbc.CardHeader("Encounters for Selected Complaint"),
-            dbc.CardBody([
-                html.Div(id="t1-encounters-container"),
-                dcc.Store(id="t1-selected-complaint-data", data={}),
-            ])
+            dbc.CardHeader("Complaints — click one to view encounters"),
+            dbc.CardBody(
+                dcc.Loading(
+                    html.Div(
+                        id="t1-complaints-pills",
+                        className="d-flex flex-wrap gap-2",
+                        style={"minHeight": "38px"},
+                    ),
+                    type="circle",
+                )
+            ),
+        ], className="mb-3"),
+
+        # Encounters
+        dbc.Card([
+            dbc.CardHeader(html.Span(id="t1-encounters-header", children="Encounters")),
+            dbc.CardBody(
+                dcc.Loading(
+                    html.Div(id="t1-encounters-container"),
+                    type="circle",
+                )
+            ),
         ], className="mb-3"),
 
         dbc.Alert(id="t1-msg", is_open=False, color="danger"),
-
         html.Hr(),
 
-        # Comments Section (for backward compatibility with athlete selection)
+        # Comments
         dbc.Card([
             dbc.CardHeader([
                 html.Span("Comments", className="me-2"),
@@ -300,8 +298,6 @@ def tab1_layout():
                         dcc.DatePickerSingle(id="t1-comment-date", display_format="YYYY-MM-DD", style={"width":"100%"}),
                         dcc.Dropdown(id="t1-complaint-dd", placeholder="Pick a complaint (optional)…",
                                      style={"width":"100%","marginTop":"6px"}),
-
-                        # Toggle + collapsible Status Override
                         dbc.Button(
                             "Show Status Override", id="t1-toggle-status", color="secondary",
                             className="w-100", style={"marginTop": "6px"}
@@ -317,16 +313,12 @@ def tab1_layout():
                             id="t1-status-collapse",
                             is_open=False
                         ),
-
                         dbc.Button("Save Comment", id="t1-save-comment", color="success",
                                    className="w-100", style={"marginTop":"6px"}),
                     ], md=4),
                 ], className="g-2"),
-
                 html.Div(id="t1-comment-status", className="mt-2"),
-
                 html.Hr(),
-
                 dash_table.DataTable(
                     id="t1-comments-table",
                     columns=[
@@ -353,7 +345,9 @@ def tab1_layout():
             ])
         ], className="mb-4"),
 
-        # Data stores
+        # Stores
+        dcc.Store(id="t1-active-complaint-id", data=None),
+        dcc.Store(id="t1-selected-complaint-data", data={}),
         dcc.Store(id="t1-rows-json", data=[]),
         dcc.Store(id="t1-selected-branch", data=None),
         dcc.Store(id="t1-selected-athlete", data=None),
@@ -697,169 +691,191 @@ def _expand_comment_record(rec, athlete_label, cid: int):
         "Comment": rec["Comment"],
     }
 
+# ───────────────────────── Pill helper ─────────────────────────
+def _build_complaint_pills(complaints, active_id=None):
+    if not complaints:
+        return [html.Span("No complaints found for this athlete.", className="text-muted small")]
+    pills = []
+    for c in complaints:
+        cid   = c.get("Id") or c.get("id")
+        title = (c.get("Title") or "").strip()
+        lat   = (c.get("Laterality") or "").strip()
+        label = f"{title} ({lat})" if lat else title
+        is_active = (cid is not None and cid == active_id)
+        bg = color_for_label(title)
+        style = {
+            "padding": "5px 14px",
+            "borderRadius": "20px",
+            "fontSize": "13px",
+            "fontWeight": "600" if is_active else "400",
+            "cursor": "pointer",
+            "border": "2px solid #084298" if is_active else f"1px solid {BORDER}",
+            "background": "#cfe2ff" if is_active else bg,
+            "color": "#084298" if is_active else "#111",
+            "boxShadow": "0 0 0 3px rgba(13,110,253,.25)" if is_active else "none",
+            "transition": "all .15s",
+        }
+        pills.append(html.Button(label, id={"type": "t1-complaint-pill", "index": cid}, style=style, n_clicks=0))
+    return pills
+
 # ───────────────────────── Cascading Callbacks ─────────────────────────
 # Step 1: Load athletes when branch is selected
 @app.callback(
     Output("t1-athlete-dd", "options"),
     Output("t1-athlete-dd", "disabled"),
     Output("t1-athlete-dd", "value"),
-    Output("t1-complaint-select-dd", "options"),
-    Output("t1-complaint-select-dd", "disabled"),
-    Output("t1-complaint-select-dd", "value"),
     Output("t1-cascade-status", "children"),
     Input("t1-branch-dd", "value"),
     prevent_initial_call=True
 )
 def t1_load_athletes(branch_id):
     if not branch_id:
-        return [], True, None, [], True, None, "Select a branch to load athletes."
-    
+        return [], True, None, "Select a branch to load athletes."
     try:
         athletes = td.get_athletes_for_branch(int(branch_id))
         options = [{"label": a["label"], "value": a["id"]} for a in athletes]
-        if options:
-            status_msg = f"{len(options)} athlete(s) in this branch. Select one to view complaints."
-        else:
-            status_msg = "No athletes found for this branch."
-        return options, False, None, [], True, None, status_msg
+        status_msg = f"{len(options)} athlete(s) in this branch. Select one to view complaints." if options else "No athletes found for this branch."
+        return options, False, None, status_msg
     except Exception as e:
         print(f"Error loading athletes: {e}")
-        import traceback
         traceback.print_exc()
-        return [], True, None, [], True, None, f"Error: {str(e)}"
+        return [], True, None, f"Error: {str(e)}"
 
-# Step 2: Load complaints when athlete is selected
+# Step 2: Render complaint pills when athlete is selected
 @app.callback(
-    Output("t1-complaint-select-dd", "options", allow_duplicate=True),
-    Output("t1-complaint-select-dd", "disabled", allow_duplicate=True),
-    Output("t1-complaint-select-dd", "value", allow_duplicate=True),
+    Output("t1-complaints-pills", "children"),
+    Output("t1-active-complaint-id", "data"),
     Input("t1-athlete-dd", "value"),
-    prevent_initial_call=True
+    prevent_initial_call=True,
 )
-def t1_load_complaints(athlete_id):
+def t1_render_complaint_pills(athlete_id):
     if not athlete_id:
-        return [], True, None
-    
+        return [], None
     try:
         complaints = td.fetch_customer_complaints(int(athlete_id))
-        options = []
-        for c in complaints:
-            title = c.get("Title") or c.get("title") or c.get("name") or f"Complaint {c.get('Id', c.get('id'))}"
-            lat   = (c.get("Laterality") or "").strip()
-            label = f"{title} ({lat})" if lat else title
-            options.append({"label": label, "value": c.get("Id") or c.get("id")})
-        return options, False, None
+        return _build_complaint_pills(complaints, active_id=None), None
     except Exception as e:
-        print(f"Error loading complaints: {e}")
-        import traceback
+        print(f"Error rendering complaint pills: {e}")
         traceback.print_exc()
-        return [], True, None
+        return [dbc.Alert(f"Error loading complaints: {e}", color="danger")], None
 
-# Step 3: Enable/disable View Encounters button based on complaint selection
+# Step 3: Pill click → highlight active pill + update store
 @app.callback(
-    Output("t1-view-encounters-btn", "disabled"),
-    Input("t1-complaint-select-dd", "value"),
-    prevent_initial_call=True
+    Output("t1-complaints-pills", "children", allow_duplicate=True),
+    Output("t1-active-complaint-id", "data", allow_duplicate=True),
+    Input({"type": "t1-complaint-pill", "index": ALL}, "n_clicks"),
+    State("t1-athlete-dd", "value"),
+    prevent_initial_call=True,
 )
-def t1_button_state(complaint_id):
-    return not bool(complaint_id)
+def t1_pill_clicked(n_clicks_list, athlete_id):
+    if not any(n_clicks_list) or not athlete_id or not ctx.triggered:
+        raise PreventUpdate
+    triggered_prop = ctx.triggered[0]["prop_id"]
+    try:
+        import json as _json
+        active_id = _json.loads(triggered_prop.rsplit(".", 1)[0])["index"]
+    except Exception:
+        raise PreventUpdate
+    try:
+        complaints = td.fetch_customer_complaints(int(athlete_id))
+        return _build_complaint_pills(complaints, active_id=active_id), active_id
+    except Exception:
+        raise PreventUpdate
 
-# Step 4: Load and display encounters when button is clicked or complaint is selected
+# Step 4: Load encounters automatically when active complaint changes
 @app.callback(
     Output("t1-encounters-container", "children"),
+    Output("t1-encounters-header", "children"),
     Output("t1-selected-complaint-data", "data"),
-    Input("t1-view-encounters-btn", "n_clicks"),
-    State("t1-branch-dd", "value"),
+    Input("t1-active-complaint-id", "data"),
     State("t1-athlete-dd", "value"),
-    State("t1-complaint-select-dd", "value"),
-    prevent_initial_call=True
+    prevent_initial_call=True,
 )
-def t1_view_encounters(n_clicks, branch_id, athlete_id, complaint_id):
-    if not all([branch_id, athlete_id, complaint_id]):
-        return dbc.Alert("Please select branch, athlete, and complaint.", color="warning"), {}
-    
+def t1_load_encounters(complaint_id, athlete_id):
+    if not complaint_id or not athlete_id:
+        return html.Div(), "Encounters", {}
     try:
         encounters = td.get_encounters_for_complaint(int(complaint_id), int(athlete_id))
-        
+
+        # Build header with complaint name
+        header = f"Encounters — complaint {complaint_id}"
+        try:
+            complaints = td.fetch_customer_complaints(int(athlete_id))
+            for c in complaints:
+                if (c.get("Id") or c.get("id")) == complaint_id:
+                    t   = (c.get("Title") or "").strip()
+                    lat = (c.get("Laterality") or "").strip()
+                    header = f"Encounters — {t + ' (' + lat + ')' if lat else t}"
+                    break
+        except Exception:
+            pass
+
         if not encounters:
-            content = dbc.Alert("No encounters found for this complaint.", color="info")
-        else:
-            def _enc_date(enc):
-                raw = enc.get("chart_date") or enc.get("date") or ""
-                return raw.split("T")[0] if raw else "—"
+            return dbc.Alert("No encounters found for this complaint.", color="info"), header, {}
 
-            def _enc_type(enc):
-                try:
-                    return enc["data"][0]["template"]["tab_name"]
-                except (KeyError, IndexError, TypeError):
-                    return enc.get("type") or enc.get("encounter_type") or "—"
+        def _enc_date(enc):
+            raw = enc.get("chart_date") or enc.get("date") or ""
+            return raw.split("T")[0] if raw else "—"
 
-            def _enc_fields_summary(enc):
-                try:
-                    fields = enc["data"][0]["fields"]
-                    parts = []
-                    for f in fields:
-                        if not f.get("id", "").startswith("Id_select"):
-                            continue
-                        val = (f.get("value") or "").strip()
-                        if not val or val.startswith("-----"):
-                            continue
-                        name = (f.get("name") or "").strip()
-                        parts.append(f"{name}: {val}" if name else val)
-                    return "; ".join(parts) if parts else "—"
-                except (KeyError, IndexError, TypeError):
-                    return "—"
+        def _enc_type(enc):
+            try:
+                return enc["data"][0]["template"]["tab_name"]
+            except (KeyError, IndexError, TypeError):
+                return enc.get("type") or enc.get("encounter_type") or "—"
 
-            rows = [
-                {
-                    "Date": _enc_date(enc),
-                    "Form": _enc_type(enc),
-                    "Training Status": td.extract_training_status(enc) or "—",
-                    "Fields": _enc_fields_summary(enc),
-                }
-                for enc in sorted(encounters, key=lambda e: _enc_date(e))
-            ]
+        def _enc_fields_summary(enc):
+            try:
+                fields = enc["data"][0]["fields"]
+                parts = []
+                for f in fields:
+                    if not f.get("id", "").startswith("Id_select"):
+                        continue
+                    val = (f.get("value") or "").strip()
+                    if not val or val.startswith("-----"):
+                        continue
+                    name = (f.get("name") or "").strip()
+                    parts.append(f"{name}: {val}" if name else val)
+                return "; ".join(parts) if parts else "—"
+            except (KeyError, IndexError, TypeError):
+                return "—"
 
-            table = dash_table.DataTable(
-                data=rows,
-                columns=[
-                    {"name": "Date", "id": "Date"},
-                    {"name": "Form", "id": "Form"},
-                    {"name": "Training Status", "id": "Training Status"},
-                    {"name": "Fields", "id": "Fields"},
-                ],
-                style_table={"overflowX": "auto"},
-                style_header={"fontWeight": "600", "backgroundColor": "#f8f9fa"},
-                style_cell={
-                    "padding": "9px", "fontSize": 14, "textAlign": "left",
-                    "whiteSpace": "normal", "maxWidth": "500px",
-                },
-                style_data={"borderBottom": "1px solid #eceff4"},
-                style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#fbfbfd"}],
-            )
-            content = html.Div([
-                html.H6(f"Encounters for selected complaint ({len(encounters)} found)"),
-                table
-            ])
-        
-        complaint_data = {
-            "branch_id": branch_id,
-            "athlete_id": athlete_id,
-            "complaint_id": complaint_id,
-            "encounters_count": len(encounters) if encounters else 0
-        }
-        
-        return content, complaint_data
-    
+        rows = [
+            {
+                "Date": _enc_date(enc),
+                "Form": _enc_type(enc),
+                "Training Status": td.extract_training_status(enc) or "—",
+                "Fields": _enc_fields_summary(enc),
+            }
+            for enc in sorted(encounters, key=lambda e: _enc_date(e))
+        ]
+
+        table = dash_table.DataTable(
+            data=rows,
+            columns=[
+                {"name": "Date", "id": "Date"},
+                {"name": "Form", "id": "Form"},
+                {"name": "Training Status", "id": "Training Status"},
+                {"name": "Fields", "id": "Fields"},
+            ],
+            style_table={"overflowX": "auto"},
+            style_header={"fontWeight": "600", "backgroundColor": "#f8f9fa"},
+            style_cell={
+                "padding": "9px", "fontSize": 14, "textAlign": "left",
+                "whiteSpace": "normal", "maxWidth": "500px",
+            },
+            style_data={"borderBottom": "1px solid #eceff4"},
+            style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#fbfbfd"}],
+        )
+        content = html.Div([
+            html.H6(f"{len(encounters)} encounter(s) found"),
+            table
+        ])
+        return content, header, {"complaint_id": complaint_id, "athlete_id": athlete_id, "encounters_count": len(encounters)}
+
     except Exception as e:
-        print(f"Error displaying encounters: {e}")
-        import traceback
+        print(f"Error loading encounters: {e}")
         traceback.print_exc()
-        alert = dbc.Alert([
-            html.Div("Error loading encounters:"),
-            html.Pre(str(e))
-        ], color="danger")
-        return alert, {}
+        return dbc.Alert([html.Div("Error loading encounters:"), html.Pre(str(e))], color="danger"), "Encounters", {}
 
 # ───────────────────────── Training tab callbacks ─────────────────────────
 td.register_callbacks(app)
