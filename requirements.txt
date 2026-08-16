@@ -3,9 +3,5 @@ dash-auth-external
 python-dotenv
 pandas
 dash_bootstrap_components
-plotly>=5.20
-numpy>=1.24
 requests>=2.31
-plotly-calplot>=0.1.20
-dash-ag-grid>=2.5.0
-
+reportlab>=4.0
