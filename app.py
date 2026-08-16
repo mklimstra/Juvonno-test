@@ -111,49 +111,65 @@ def build_history_csv_bytes(cid: int) -> bytes:
     return df.to_csv(index=False).encode("utf-8")
 
 def push_to_juvonno(assessment: dict, scores: dict, upload_pdf: bool, update_csv: bool) -> list:
-    """Upload PDF and/or pull-append-reupload the history CSV. Returns status strings."""
-    msgs = []
+    """Upload PDF and/or pull-append-reupload the history CSV. The two steps are
+    independent — a failure in one is reported but does not block the other.
+    Returns status strings; raises only if every requested step failed."""
+    msgs, errors = [], []
     cid = int(assessment["athlete_id"])
     exam_date = assessment.get("date_of_examination") or date.today().isoformat()
 
     if upload_pdf:
-        pdf_bytes = build_scat6_pdf(assessment, scores)
-        name = _pdf_name(assessment)
-        juv.upload_customer_document(
-            cid, pdf_bytes, name,
-            description=f"SCAT6 assessment ({assessment.get('assessment_type', '')}) — {exam_date}",
-            date=exam_date)
-        msgs.append(f"PDF uploaded to Juvonno as {name}")
+        try:
+            pdf_bytes = build_scat6_pdf(assessment, scores)
+            name = _pdf_name(assessment)
+            juv.upload_customer_document(
+                cid, pdf_bytes, name,
+                description=f"SCAT6 assessment ({assessment.get('assessment_type', '')}) — {exam_date}",
+                date=exam_date)
+            msgs.append(f"PDF uploaded to Juvonno as {name}")
+        except Exception as e:
+            traceback.print_exc()
+            errors.append(f"PDF upload failed: {e}")
 
     if update_csv:
-        csv_name = _csv_name(cid)
-        new_row = S.to_flat_record(assessment, scores)
-        existing = juv.find_document_by_name(cid, csv_name)
-        df = pd.DataFrame(columns=S.CSV_COLUMNS)
-        if existing is not None:
-            try:
-                _, raw = juv.download_customer_document(cid, int(existing.get("id")))
-                df = pd.read_csv(io.BytesIO(raw))
-            except Exception as e:
-                msgs.append(f"Could not read existing history CSV ({e}); rebuilding from local records")
-        if df.empty:
-            # Seed with every local assessment for this athlete (includes the new one if saved)
-            try:
-                df = pd.read_csv(io.BytesIO(build_history_csv_bytes(cid)))
-            except Exception:
-                df = pd.DataFrame(columns=S.CSV_COLUMNS)
-        # Append if this assessment_id isn't already present
-        aid = new_row.get("assessment_id")
-        already = (aid and "assessment_id" in df.columns
-                   and (df["assessment_id"].astype(str) == str(aid)).any())
-        if not already:
-            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        df = df.reindex(columns=S.CSV_COLUMNS)
-        juv.upload_customer_document(
-            cid, df.to_csv(index=False).encode("utf-8"), csv_name,
-            description="SCAT6 longitudinal history (auto-appended)", date=exam_date)
-        msgs.append(f"History CSV updated in Juvonno ({len(df)} assessment(s) in {csv_name})")
+        try:
+            csv_name = _csv_name(cid)
+            new_row = S.to_flat_record(assessment, scores)
+            existing = juv.find_document_by_name(cid, csv_name)
+            df = pd.DataFrame(columns=S.CSV_COLUMNS)
+            if existing is not None:
+                try:
+                    _, raw = juv.download_customer_document(cid, int(existing.get("id")))
+                    df = pd.read_csv(io.BytesIO(raw))
+                except Exception as e:
+                    msgs.append(f"Could not read existing history CSV ({e}); "
+                                f"rebuilding from local records")
+            if df.empty:
+                # Seed with every local assessment for this athlete
+                # (includes the new one if already saved)
+                try:
+                    df = pd.read_csv(io.BytesIO(build_history_csv_bytes(cid)))
+                except Exception:
+                    df = pd.DataFrame(columns=S.CSV_COLUMNS)
+            # Append if this assessment_id isn't already present
+            aid = new_row.get("assessment_id")
+            already = (aid and "assessment_id" in df.columns
+                       and (df["assessment_id"].astype(str) == str(aid)).any())
+            if not already:
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            df = df.reindex(columns=S.CSV_COLUMNS)
+            juv.upload_customer_document(
+                cid, df.to_csv(index=False).encode("utf-8"), csv_name,
+                description="SCAT6 longitudinal history (auto-appended)", date=exam_date)
+            msgs.append(f"History CSV updated in Juvonno "
+                        f"({len(df)} assessment(s) in {csv_name})")
+        except Exception as e:
+            traceback.print_exc()
+            errors.append(f"History CSV update failed: {e}")
 
+    if errors and not msgs:
+        raise RuntimeError("; ".join(errors))
+    msgs.extend(errors)  # partial failure: surface alongside successes
     return msgs
 
 # ───────────────────────── Small UI builders ─────────────────────────
