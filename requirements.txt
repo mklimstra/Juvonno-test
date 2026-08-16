@@ -2,6 +2,8 @@ dash
 dash-auth-external
 python-dotenv
 pandas
-dash_bootstrap_components
+dash_bootstrap_components   # used only by layout/navbar + footer
 requests>=2.31
 reportlab>=4.0
+dash-mantine-components>=2.0
+dash-iconify

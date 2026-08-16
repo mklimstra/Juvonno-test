@@ -510,16 +510,50 @@ def upload_customer_document(customer_id: int, file_bytes: bytes, filename: str,
     return _post_multipart(path, files=files, data=data, use_api_key=False)
 
 
-def find_document_by_name(customer_id: int, filename: str) -> Optional[Dict]:
-    """Return the newest document record whose name matches filename (case-insensitive)."""
-    target = filename.strip().lower()
-    matches = []
-    for d in list_customer_documents(customer_id):
-        name = str(d.get("name") or d.get("filename") or d.get("file_name") or "").strip().lower()
-        if name == target or name == target.rsplit(".", 1)[0]:
-            matches.append(d)
-    if not matches:
-        return None
+def _doc_name_matches(doc: Dict, filename: str) -> bool:
+    """Case-insensitive match on any of the document's name fields, with or
+    without the file extension (Juvonno may store either form)."""
+    def _stem(s: str) -> str:
+        s = (s or "").strip().lower()
+        return s.rsplit(".", 1)[0] if "." in s else s
+    target_stem = _stem(filename)
+    if not target_stem:
+        return False
+    for key in ("name", "filename", "file_name", "title"):
+        if _stem(str(doc.get(key) or "")) == target_stem:
+            return True
+    return False
+
+
+def find_documents_by_name(customer_id: int, filename: str) -> List[Dict]:
+    """All matching document records, newest last."""
+    matches = [d for d in list_customer_documents(customer_id)
+               if _doc_name_matches(d, filename)]
     def _key(d):
         return str(d.get("date") or d.get("created_at") or ""), int(d.get("id") or 0)
-    return sorted(matches, key=_key)[-1]
+    return sorted(matches, key=_key)
+
+
+def find_document_by_name(customer_id: int, filename: str) -> Optional[Dict]:
+    """Return the newest document record whose name matches filename."""
+    matches = find_documents_by_name(customer_id, filename)
+    return matches[-1] if matches else None
+
+
+def delete_customer_document(customer_id: int, document_id: int) -> bool:
+    """Try to delete a customer document. The v2.5.4 spec defines no DELETE for
+    documents, but some instances accept it — so attempt and report success.
+    Returns True if deleted, False if the API refused/doesn't support it."""
+    if not API_KEY:
+        return False
+    url = f"{BASE}/customers/{int(customer_id)}/documents/{int(document_id)}"
+    headers = {"x-api-key": API_KEY, "accept": "application/json"}
+    try:
+        r = requests.delete(url, params={"api_key": API_KEY}, headers=headers, timeout=15)
+        if r.ok:
+            return True
+        print(_redact(f"DELETE document {document_id}: {r.status_code} {r.text[:200]}"))
+        return False
+    except Exception as e:
+        print(_redact(f"DELETE document {document_id} failed: {e}"))
+        return False
