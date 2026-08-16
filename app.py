@@ -1,12 +1,18 @@
 # app.py — SCAT6 intake tool for practitioners.
 #
 # Same OAuth2 flow as before (apps.csipacific.ca via dash-auth-external) and the
-# same Juvonno branch → group → athlete cascade. UI is built with
-# dash-mantine-components + dash-iconify; the original bootstrap Navbar and
-# Footer (layout/) are kept unchanged. Completed assessments are stored locally
-# (SQLite) and pushed to the athlete's Juvonno documents as a formatted PDF
-# plus a single per-athlete SCAT6 history CSV that is pulled, appended, and
-# re-uploaded (superseded copies are deleted when the API allows it).
+# same Juvonno branch → group → athlete cascade. UI: dash-mantine-components +
+# dash-iconify; the original bootstrap Navbar and Footer (layout/) are unchanged.
+#
+# Data flow:
+#   • Juvonno is the source of truth for history — the History tab reads the
+#     athlete's SCAT6_History CSV and document list (older PDFs) from Juvonno.
+#   • Local SQLite is the offline safety net: every assessment saves locally
+#     first, then pushes to Juvonno (PDF + appended history CSV). If the push
+#     fails (no internet / API down), the assessment stays queued and is
+#     retried automatically in the background, or manually via "Sync now".
+#   • All form inputs persist in the browser (localStorage), so a refresh or
+#     dropped connection mid-intake loses nothing.
 import io, os, base64, traceback
 from datetime import date
 
@@ -30,6 +36,7 @@ import juvonno_api as juv
 # ───────────────────────── Constants ─────────────────────────
 BASE_ROOT_URL = APP_URL  # login entry point (same value the old app hardcoded)
 NAVY = "#2b3a67"
+PERSIST = {"persistence": True, "persistence_type": "local"}
 
 def icon(name, **kw):
     return DashIconify(icon=name, width=kw.pop("width", 20), **kw)
@@ -108,7 +115,8 @@ def _pdf_name(assessment: dict) -> str:
     return f"SCAT6_{d}_athlete{assessment.get('athlete_id', '')}.pdf"
 
 def build_history_csv_bytes(cid: int) -> bytes:
-    """CSV of all locally-stored assessments for the athlete."""
+    """CSV of all locally-stored assessments for the athlete (used only to seed
+    a brand-new history CSV in Juvonno, or rebuild a lost one)."""
     rows = []
     for meta in store.list_assessments(int(cid)):
         rec = store.get_assessment(meta["id"])
@@ -117,15 +125,26 @@ def build_history_csv_bytes(cid: int) -> bytes:
     df = pd.DataFrame(rows, columns=S.CSV_COLUMNS)
     return df.to_csv(index=False).encode("utf-8")
 
-def push_to_juvonno(assessment: dict, scores: dict, upload_pdf: bool, update_csv: bool) -> list:
-    """Upload PDF and/or pull-append-reupload the history CSV. The two steps are
-    independent — a failure in one is reported but does not block the other.
-    Returns status strings; raises only if every requested step failed."""
-    msgs, errors = [], []
+def fetch_history_df(cid: int):
+    """Pull the newest SCAT6 history CSV for this athlete from Juvonno.
+    Returns (DataFrame or None, message)."""
+    copies = juv.find_documents_by_name(int(cid), _csv_name(int(cid)))
+    if not copies:
+        return None, "No SCAT6 history CSV found in Juvonno for this athlete yet."
+    _, raw = juv.download_customer_document(int(cid), int(copies[-1].get("id")))
+    df = pd.read_csv(io.BytesIO(raw))
+    return df, f"Loaded {len(df)} assessment(s) from Juvonno ({_csv_name(int(cid))})."
+
+def push_to_juvonno(assessment: dict, scores: dict, parts) -> tuple:
+    """Upload PDF and/or pull-append-reupload the history CSV, per `parts`
+    (iterable containing 'pdf' and/or 'csv'). The steps are independent.
+    Returns (msgs, errors, failed_parts)."""
+    msgs, errors, failed = [], [], []
+    parts = set(parts or [])
     cid = int(assessment["athlete_id"])
     exam_date = assessment.get("date_of_examination") or date.today().isoformat()
 
-    if upload_pdf:
+    if "pdf" in parts:
         try:
             pdf_bytes = build_scat6_pdf(assessment, scores)
             name = _pdf_name(assessment)
@@ -137,8 +156,9 @@ def push_to_juvonno(assessment: dict, scores: dict, upload_pdf: bool, update_csv
         except Exception as e:
             traceback.print_exc()
             errors.append(f"PDF upload failed: {e}")
+            failed.append("pdf")
 
-    if update_csv:
+    if "csv" in parts:
         try:
             csv_name = _csv_name(cid)
             new_row = S.to_flat_record(assessment, scores)
@@ -152,8 +172,6 @@ def push_to_juvonno(assessment: dict, scores: dict, upload_pdf: bool, update_csv
                     msgs.append(f"Could not read existing history CSV ({e}); "
                                 f"rebuilding from local records")
             if df.empty:
-                # Seed with every local assessment for this athlete
-                # (includes the new one if already saved)
                 try:
                     df = pd.read_csv(io.BytesIO(build_history_csv_bytes(cid)))
                 except Exception:
@@ -171,9 +189,7 @@ def push_to_juvonno(assessment: dict, scores: dict, upload_pdf: bool, update_csv
             msgs.append(f"History CSV updated in Juvonno "
                         f"({len(df)} assessment(s) in {csv_name})")
 
-            # Clean up superseded copies. Juvonno's public API defines no DELETE
-            # for documents, but some instances accept it — try, and be honest
-            # about the result either way.
+            # Clean up superseded copies where the instance allows DELETE.
             if old_copies:
                 deleted = sum(
                     1 for d in old_copies
@@ -192,11 +208,38 @@ def push_to_juvonno(assessment: dict, scores: dict, upload_pdf: bool, update_csv
         except Exception as e:
             traceback.print_exc()
             errors.append(f"History CSV update failed: {e}")
+            failed.append("csv")
 
-    if errors and not msgs:
-        raise RuntimeError("; ".join(errors))
-    msgs.extend(errors)  # partial failure: surface alongside successes
-    return msgs
+    return msgs, errors, failed
+
+def sync_pending() -> tuple:
+    """Push every unsynced assessment to Juvonno. Returns (n_synced, n_still_pending,
+    detail_lines)."""
+    pending = store.list_unsynced()
+    if not pending:
+        return 0, 0, []
+    synced_n, lines = 0, []
+    for meta in pending:
+        rec = store.get_assessment(meta["id"])
+        if not rec:
+            continue
+        a = rec["assessment"]
+        a["assessment_id"] = meta["id"]
+        parts = [p for p in (meta.get("pending_parts") or "").split(",") if p] \
+            or list(a.get("push_opts") or ["pdf", "csv"])
+        try:
+            msgs, errors, failed = push_to_juvonno(a, rec["scores"], parts)
+        except Exception as e:
+            errors, failed = [str(e)], parts
+        label = f"#{meta['id']} {meta.get('athlete_name', '')} ({meta.get('date_of_examination', '')})"
+        if not failed:
+            store.mark_synced(meta["id"])
+            synced_n += 1
+            lines.append(f"Synced {label}")
+        else:
+            store.set_pending_parts(meta["id"], ",".join(failed))
+            lines.append(f"Still pending {label}: {'; '.join(errors) or 'upload failed'}")
+    return synced_n, len(store.list_unsynced()), lines
 
 # ───────────────────────── Small UI builders ─────────────────────────
 def ok_alert(children):
@@ -214,16 +257,22 @@ def err_alert(children):
 def yn(id_, options=("Y", "N")):
     return dmc.RadioGroup(
         dmc.Group([dmc.Radio(label=o, value=o) for o in options], gap="md"),
-        id=id_, value=None)
+        id=id_, value=None, **PERSIST)
 
 def num_input(id_, label=None, maxv=None, step=1, decimals=False, width=140):
     return dmc.NumberInput(id=id_, label=label, min=0, max=maxv, step=step,
-                           allowDecimal=bool(decimals), value="", w=width)
+                           allowDecimal=bool(decimals), value="", w=width, **PERSIST)
 
 def zero_one(id_):
     return dmc.RadioGroup(
         dmc.Group([dmc.Radio(label="0", value="0"), dmc.Radio(label="1", value="1")], gap="md"),
-        id=id_, value=None)
+        id=id_, value=None, **PERSIST)
+
+def text_input(id_, label=None, **kw):
+    return dmc.TextInput(id=id_, label=label, **PERSIST, **kw)
+
+def textarea(id_, label=None, **kw):
+    return dmc.Textarea(id=id_, label=label, autosize=True, **PERSIST, **kw)
 
 def section(title, children, icon_name="tabler:clipboard-check", color=NAVY):
     return dmc.Paper([
@@ -252,7 +301,7 @@ def _word_grid(list_key: str, comp_type: str, trials: int):
         for t in range(trials):
             cells.append(html.Td(
                 dmc.Center(dmc.Checkbox(id={"type": comp_type, "index": f"{t}-{wi}"},
-                                        checked=False))))
+                                        checked=False, **PERSIST))))
         body.append(html.Tr(cells))
     return dmc.Table([html.Thead(html.Tr(header)), html.Tbody(body)],
                      striped=True, verticalSpacing="xs", withTableBorder=False,
@@ -307,39 +356,43 @@ def form_layout():
             html.Td(dmc.Text(symptom, size="sm"), style={"width": "40%"}),
             html.Td(dmc.SegmentedControl(
                 id={"type": "f-sym", "index": i}, value="0", size="xs",
-                data=[str(v) for v in range(0, 7)], fullWidth=True)),
+                data=[str(v) for v in range(0, 7)], fullWidth=True, **PERSIST)),
         ]))
 
     return dmc.Box([
         # ── Athlete info ──
         section("Athlete Information", [
             dmc.Grid([
-                col(dmc.TextInput(id="f-name", label="Athlete name")),
-                col(dmc.TextInput(id="f-idnum", label="ID number (Juvonno)", disabled=True), span=2),
-                col(dmc.TextInput(id="f-dob", label="Date of birth", placeholder="YYYY-MM-DD"), span=3),
+                col(text_input("f-name", "Athlete name")),
+                col(dmc.TextInput(id="f-idnum", label="ID number (Juvonno)",
+                                  disabled=True), span=2),
+                col(text_input("f-dob", "Date of birth", placeholder="YYYY-MM-DD"), span=3),
                 col(dmc.Select(id="f-sex", label="Sex",
-                               data=["Male", "Female", "Prefer Not To Say", "Other"]), span=3),
+                               data=["Male", "Female", "Prefer Not To Say", "Other"],
+                               **PERSIST), span=3),
             ], gutter="sm"),
             dmc.Grid([
                 col(dmc.DatePickerInput(id="f-exam-date", label="Date of examination",
                                         value=date.today().isoformat(),
                                         valueFormat="YYYY-MM-DD",
-                                        leftSection=icon("tabler:calendar", width=16)), span=3),
+                                        leftSection=icon("tabler:calendar", width=16),
+                                        **PERSIST), span=3),
                 col(dmc.RadioGroup(
                     dmc.Group([dmc.Radio(label="Baseline", value="baseline"),
                                dmc.Radio(label="Suspected/Post-injury", value="post_injury")]),
-                    id="f-assess-type", value="post_injury", label="Assessment type"), span=4),
-                col(dmc.TextInput(id="f-injury-date", label="Date of injury",
-                                  placeholder="YYYY-MM-DD"), span=2),
-                col(dmc.TextInput(id="f-injury-time", label="Time of injury",
-                                  placeholder="HH:MM"), span=1),
+                    id="f-assess-type", value="post_injury", label="Assessment type",
+                    **PERSIST), span=4),
+                col(text_input("f-injury-date", "Date of injury",
+                               placeholder="YYYY-MM-DD"), span=2),
+                col(text_input("f-injury-time", "Time of injury",
+                               placeholder="HH:MM"), span=1),
                 col(dmc.Select(id="f-hand", label="Dominant hand",
-                               data=["Left", "Right", "Ambidextrous"]), span=2),
+                               data=["Left", "Right", "Ambidextrous"], **PERSIST), span=2),
             ], gutter="sm"),
             dmc.Grid([
-                col(dmc.TextInput(id="f-sport", label="Sport / Team / School"), span=6),
-                col(dmc.TextInput(id="f-time-since", label="Time since injury",
-                                  placeholder="e.g. 45 mins / 2 days"), span=3),
+                col(text_input("f-sport", "Sport / Team / School"), span=6),
+                col(text_input("f-time-since", "Time since injury",
+                               placeholder="e.g. 45 mins / 2 days"), span=3),
             ], gutter="sm"),
         ], icon_name="tabler:id-badge-2"),
 
@@ -347,10 +400,10 @@ def form_layout():
         section("Concussion History", [
             dmc.Grid([
                 col(num_input("f-num-conc", "Diagnosed concussions in the past", maxv=99), span=3),
-                col(dmc.TextInput(id="f-recent-conc", label="Most recent concussion",
-                                  placeholder="YYYY-MM-DD or description"), span=3),
+                col(text_input("f-recent-conc", "Most recent concussion",
+                               placeholder="YYYY-MM-DD or description"), span=3),
                 col(num_input("f-recovery-days", "Recovery time (days)", maxv=9999), span=3),
-                col(dmc.TextInput(id="f-primary-symptoms", label="Primary symptoms"), span=3),
+                col(text_input("f-primary-symptoms", "Primary symptoms"), span=3),
             ], gutter="sm"),
         ], icon_name="tabler:history"),
 
@@ -359,7 +412,7 @@ def form_layout():
             dmc.CheckboxGroup(
                 dmc.Stack([dmc.Checkbox(label=f, value=str(i))
                            for i, f in enumerate(S.RED_FLAGS)], gap=6),
-                id="f-redflags", value=[]),
+                id="f-redflags", value=[], **PERSIST),
         ], icon_name="tabler:flag-exclamation", color="#8f1f2f"),
 
         # ── Immediate assessment ──
@@ -367,7 +420,7 @@ def form_layout():
             dmc.CheckboxGroup(
                 dmc.Group([dmc.Checkbox(label="Witnessed", value="witnessed"),
                            dmc.Checkbox(label="Observed on Video", value="video")]),
-                id="f-obs-context", value=[], mb="sm"),
+                id="f-obs-context", value=[], mb="sm", **PERSIST),
             qtable([(dmc.Text(sign, size="sm"), yn({"type": "f-obs", "index": i}))
                     for i, sign in enumerate(S.OBSERVABLE_SIGNS)]),
         ], icon_name="tabler:eye"),
@@ -376,13 +429,13 @@ def form_layout():
             dmc.Grid([
                 col(dmc.Select(id="f-gcs-e", label="Best Eye Response (E)",
                                data=[{"label": f"{v} — {lbl}", "value": str(v)}
-                                     for lbl, v in S.GCS_EYE])),
+                                     for lbl, v in S.GCS_EYE], **PERSIST)),
                 col(dmc.Select(id="f-gcs-v", label="Best Verbal Response (V)",
                                data=[{"label": f"{v} — {lbl}", "value": str(v)}
-                                     for lbl, v in S.GCS_VERBAL])),
+                                     for lbl, v in S.GCS_VERBAL], **PERSIST)),
                 col(dmc.Select(id="f-gcs-m", label="Best Motor Response (M)",
                                data=[{"label": f"{v} — {lbl}", "value": str(v)}
-                                     for lbl, v in S.GCS_MOTOR])),
+                                     for lbl, v in S.GCS_MOTOR], **PERSIST)),
             ], gutter="sm"),
             dmc.Text(id="gcs-total-display", fw=600, mt="xs"),
         ], icon_name="tabler:brain"),
@@ -398,8 +451,8 @@ def form_layout():
         section("Immediate Assessment — Step 4: Coordination & Ocular/Motor Screen", [
             qtable([(dmc.Text(q, size="sm"), yn({"type": "f-coord", "index": i}))
                     for i, q in enumerate(S.COORD_OCULAR_ITEMS)]),
-            dmc.TextInput(id="f-ocular-desc",
-                          label="If extraocular movements abnormal, describe:", mt="xs"),
+            text_input("f-ocular-desc",
+                       "If extraocular movements abnormal, describe:", mt="xs"),
         ], icon_name="tabler:eye-check"),
 
         section("Immediate Assessment — Step 5: Maddocks Questions", [
@@ -415,10 +468,8 @@ def form_layout():
             qtable([(dmc.Text(label, size="sm"), yn({"type": "f-bg", "index": key}))
                     for key, label in S.BACKGROUND_ITEMS]),
             dmc.Grid([
-                col(dmc.Textarea(id="f-bg-notes", label="Notes", autosize=True,
-                                 minRows=2), span=6),
-                col(dmc.Textarea(id="f-medications", label="Current medications",
-                                 autosize=True, minRows=2), span=6),
+                col(textarea("f-bg-notes", "Notes", minRows=2), span=6),
+                col(textarea("f-medications", "Current medications", minRows=2), span=6),
             ], gutter="sm", mt="xs"),
         ], icon_name="tabler:notes"),
 
@@ -436,8 +487,7 @@ def form_layout():
                              yn("f-worse-ment")])),
                 col(num_input("f-pct-normal", S.PERCENT_NORMAL_QUESTION, maxv=100)),
             ], gutter="sm", mt="sm"),
-            dmc.Textarea(id="f-pct-why", label="If not 100%, why?", autosize=True,
-                         minRows=2, mt="xs"),
+            textarea("f-pct-why", "If not 100%, why?", minRows=2, mt="xs"),
         ], icon_name="tabler:mood-sick"),
 
         section("Off-Field — Step 3: Cognitive Screening — Orientation", [
@@ -449,9 +499,9 @@ def form_layout():
             dmc.Grid([
                 col(dmc.RadioGroup(
                     dmc.Group([dmc.Radio(label=k, value=k) for k in ("A", "B", "C")]),
-                    id="f-wordlist", value="A", label="Word list")),
-                col(dmc.TextInput(id="f-im-time", label="Time last trial completed",
-                                  placeholder="HH:MM"), span=3),
+                    id="f-wordlist", value="A", label="Word list", **PERSIST)),
+                col(text_input("f-im-time", "Time last trial completed",
+                               placeholder="HH:MM"), span=3),
             ], gutter="sm", mb="xs"),
             dmc.Box(id="im-grid"),
         ], icon_name="tabler:list-numbers"),
@@ -459,7 +509,7 @@ def form_layout():
         section("Off-Field — Step 3: Concentration — Digits Backward & Months in Reverse", [
             dmc.RadioGroup(
                 dmc.Group([dmc.Radio(label=k, value=k) for k in ("A", "B", "C")]),
-                id="f-digitlist", value="A", label="Digit list", mb="xs"),
+                id="f-digitlist", value="A", label="Digit list", mb="xs", **PERSIST),
             dmc.Box(id="dig-rows"),
             dmc.Divider(my="sm"),
             dmc.Text('"Now tell me the months of the year in reverse order as QUICKLY and '
@@ -479,16 +529,16 @@ def form_layout():
             dmc.Grid([
                 col(dmc.RadioGroup(
                     dmc.Group([dmc.Radio(label=v, value=v) for v in ("Left", "Right")]),
-                    id="f-foot", value=None, label="Foot tested"), span=3),
-                col(dmc.TextInput(id="f-surface", label="Testing surface")),
-                col(dmc.TextInput(id="f-footwear", label="Footwear")),
+                    id="f-foot", value=None, label="Foot tested", **PERSIST), span=3),
+                col(text_input("f-surface", "Testing surface")),
+                col(text_input("f-footwear", "Footwear")),
             ], gutter="sm", mb="xs"),
             dmc.Group([num_input(f"f-bess-{key}", f"{lbl} (of 10)", maxv=10)
                        for key, lbl in S.MBESS_STANCES], gap="md"),
             dmc.Text(id="bess-total-display", fw=600, mt="xs"),
             dmc.Divider(my="sm"),
             dmc.Switch(id="f-foam-toggle", checked=False,
-                       label="Add optional foam-surface mBESS"),
+                       label="Add optional foam-surface mBESS", **PERSIST),
             dmc.Box(dmc.Group([num_input(f"f-foam-{key}", f"Foam — {lbl} (of 10)", maxv=10)
                                for key, lbl in S.MBESS_STANCES], gap="md", mt="xs"),
                     id="foam-collapse", style={"display": "none"}),
@@ -504,13 +554,11 @@ def form_layout():
                                  step=0.01, decimals=True) for t in (1, 2, 3)]
                       + [num_input("f-dual-errs", "Counting errors (total)", maxv=99)],
                       gap="md", mt="xs"),
-            dmc.TextInput(id="f-tg-incomplete",
-                          label="Any trials not completed? Why?", mt="xs"),
+            text_input("f-tg-incomplete", "Any trials not completed? Why?", mt="xs"),
         ], icon_name="tabler:walk"),
 
         section("Off-Field — Step 5: Delayed Recall (≥ 5 min after Immediate Memory)", [
-            dmc.TextInput(id="f-dr-time", label="Time started", placeholder="HH:MM",
-                          w=160, mb="xs"),
+            text_input("f-dr-time", "Time started", placeholder="HH:MM", w=160, mb="xs"),
             dmc.Box(id="dr-grid"),
         ], icon_name="tabler:clock-pause"),
 
@@ -518,25 +566,27 @@ def form_layout():
             dmc.Grid([
                 col(dmc.RadioGroup(
                     dmc.Group([dmc.Radio(label=v, value=v) for v in ("Normal", "Abnormal")]),
-                    id="f-neuro", value=None, label="Neurological exam (acute evaluation)")),
+                    id="f-neuro", value=None,
+                    label="Neurological exam (acute evaluation)", **PERSIST)),
                 col(dmc.RadioGroup(
                     dmc.Group([dmc.Radio(label=v, value=v)
                                for v in ("Yes", "No", "Not applicable")]),
-                    id="f-different", value=None, label="Different from usual self?")),
+                    id="f-different", value=None,
+                    label="Different from usual self?", **PERSIST)),
                 col(dmc.RadioGroup(
                     dmc.Group([dmc.Radio(label=v, value=v)
                                for v in ("Yes", "No", "Deferred")]),
-                    id="f-diagnosed", value=None, label="Concussion diagnosed?")),
+                    id="f-diagnosed", value=None,
+                    label="Concussion diagnosed?", **PERSIST)),
             ], gutter="sm", mb="xs"),
-            dmc.Textarea(id="f-notes", label="Additional clinical notes",
-                         autosize=True, minRows=3),
+            textarea("f-notes", "Additional clinical notes", minRows=3),
             dmc.Divider(my="sm"),
             dmc.Text("I am an HCP and I have personally administered or supervised the "
                      "administration of this SCAT6.", size="sm", fs="italic", mb="xs"),
             dmc.Grid([
-                col(dmc.TextInput(id="f-examiner", label="Examiner (HCP) name")),
-                col(dmc.TextInput(id="f-examiner-title", label="Title / speciality")),
-                col(dmc.TextInput(id="f-examiner-license", label="Registration / license #")),
+                col(text_input("f-examiner", "Examiner (HCP) name")),
+                col(text_input("f-examiner-title", "Title / speciality")),
+                col(text_input("f-examiner-license", "Registration / license #")),
             ], gutter="sm"),
         ], icon_name="tabler:stethoscope"),
 
@@ -548,46 +598,38 @@ def form_layout():
                 dmc.Group([dmc.Checkbox(label="Upload PDF to Juvonno", value="pdf"),
                            dmc.Checkbox(label="Update SCAT6 history CSV in Juvonno",
                                         value="csv")]),
-                id="f-push-opts", value=["pdf", "csv"], mb="sm"),
-            dmc.Button("Save Assessment", id="btn-save", color="green", size="md",
-                       leftSection=icon("tabler:device-floppy")),
+                id="f-push-opts", value=["pdf", "csv"], mb="sm", **PERSIST),
+            dmc.Group([
+                dmc.Button("Save Assessment", id="btn-save", color="green", size="md",
+                           leftSection=icon("tabler:device-floppy")),
+                dmc.Button("Clear form", id="btn-clear", variant="subtle", color="gray",
+                           leftSection=icon("tabler:eraser")),
+            ], gap="sm"),
+            dmc.Text("Entries are kept in this browser until cleared — a refresh or "
+                     "dropped connection won't lose the form. If Juvonno can't be "
+                     "reached, the assessment is saved locally and uploaded "
+                     "automatically when the connection returns.",
+                     size="xs", c="dimmed", mt="xs"),
             dcc.Loading(dmc.Box(id="save-status", mt="sm"), type="circle"),
         ], icon_name="tabler:sum", color="#1d5b3c"),
     ])
 
 def history_layout():
     return dmc.Box([
-        section("Saved SCAT6 Assessments (local)", [
-            dash_table.DataTable(
-                id="hist-table",
-                columns=[{"name": n, "id": i} for n, i in (
-                    ("ID", "id"), ("Date", "date_of_examination"), ("Type", "assessment_type"),
-                    ("Examiner", "examiner"), ("Symptoms", "symptom_number"),
-                    ("Severity", "symptom_severity"), ("Cognitive", "cognitive_total"),
-                    ("mBESS", "mbess_total"), ("Diagnosed", "concussion_diagnosed"),
-                    ("Saved at (UTC)", "created_at"))],
-                data=[], page_action="none",
-                style_table={"overflowX": "auto", "maxHeight": "300px", "overflowY": "auto"},
-                style_header={"fontWeight": "600", "backgroundColor": "#f8f9fa"},
-                style_cell={"padding": "8px", "fontSize": 13, "textAlign": "left",
-                            "fontFamily": "inherit"},
-            ),
+        section("SCAT6 History (from Juvonno)", [
             dmc.Group([
-                dmc.Select(id="hist-assess-dd", placeholder="Pick an assessment…",
-                           searchable=True, clearable=True, w=320),
-                dmc.Button("Download PDF", id="btn-hist-pdf", color="blue",
-                           leftSection=icon("tabler:file-type-pdf")),
-                dmc.Button("Download history CSV", id="btn-hist-csv", variant="light",
+                dmc.Button("Refresh from Juvonno", id="btn-hist-refresh", variant="light",
+                           leftSection=icon("tabler:refresh")),
+                dmc.Button("Download history CSV", id="btn-hist-csv", color="blue",
                            leftSection=icon("tabler:file-type-csv")),
-                dmc.Button("Push to Juvonno", id="btn-hist-push", color="green",
-                           leftSection=icon("tabler:cloud-upload")),
-            ], gap="sm", mt="sm"),
-            dcc.Loading(dmc.Box(id="hist-status", mt="sm"), type="circle"),
-        ], icon_name="tabler:database"),
+            ], gap="sm", mb="sm"),
+            dcc.Loading(dmc.Box(id="hist-table-wrap"), type="circle"),
+            dmc.Box(id="hist-status", mt="sm"),
+        ], icon_name="tabler:cloud-download"),
         section("Serial Comparison (SCAT6 Step 6 domains across assessments)", [
-            dmc.Box(id="hist-compare"),
+            dcc.Loading(dmc.Box(id="hist-compare"), type="circle"),
         ], icon_name="tabler:chart-line"),
-        section("Athlete Documents in Juvonno (pull)", [
+        section("Athlete Documents in Juvonno (older PDFs & CSVs)", [
             dmc.Button("Refresh document list", id="btn-docs-refresh", variant="light",
                        leftSection=icon("tabler:refresh"), mb="sm"),
             dcc.Loading(dmc.Box(id="docs-table-wrap"), type="circle"),
@@ -599,6 +641,18 @@ def history_layout():
             ], gap="sm", mt="sm"),
             dmc.Box(id="docs-status", mt="sm"),
         ], icon_name="tabler:files"),
+        section("Pending Uploads (offline queue)", [
+            dmc.Text("Assessments saved while Juvonno was unreachable wait here and are "
+                     "retried automatically every 2 minutes. Nothing is lost if the "
+                     "internet drops — the local copy is kept until it uploads.",
+                     size="sm", c="dimmed", mb="sm"),
+            dmc.Box(id="pending-wrap"),
+            dmc.Group([
+                dmc.Button("Sync now", id="btn-sync", color="orange",
+                           leftSection=icon("tabler:cloud-upload")),
+            ], gap="sm", mt="sm"),
+            dcc.Loading(dmc.Box(id="sync-status", mt="sm"), type="circle"),
+        ], icon_name="tabler:cloud-pause"),
     ])
 
 # ───────────────────────── App shell ─────────────────────────
@@ -620,17 +674,21 @@ app.layout = dmc.MantineProvider(
         dcc.Location(id="redirect-to", refresh=True),
         dcc.Interval(id="init-interval", interval=500, n_intervals=0, max_intervals=1),
         dcc.Interval(id="user-refresh", interval=60_000, n_intervals=0),
+        dcc.Interval(id="sync-interval", interval=120_000, n_intervals=0),
 
         Navbar([html.Span(id="navbar-user", className="text-white-50 small", children="")]).render(),
 
         dmc.Container([
             dmc.Group([icon("tabler:first-aid-kit", width=30, color=NAVY),
-                       dmc.Title("SCAT6™ Intake Tool", order=2, c=NAVY)],
+                       dmc.Title("SCAT6™ Intake Tool", order=2, c=NAVY),
+                       dmc.Badge(id="pending-badge", color="orange", variant="light",
+                                 leftSection=icon("tabler:cloud-pause", width=12))],
                       gap="xs", mt="md"),
             dmc.Text("Sport Concussion Assessment Tool 6 — for use by Health Care "
-                     "Professionals. Athletes are loaded from Juvonno; completed assessments "
-                     "are saved locally and pushed to the athlete's Juvonno documents.",
-                     size="sm", c="dimmed", mb="md"),
+                     "Professionals. Athletes are loaded from Juvonno; history is read "
+                     "from the athlete's Juvonno documents; assessments filled out "
+                     "offline are queued locally and uploaded when the connection "
+                     "returns.", size="sm", c="dimmed", mb="md"),
             athlete_picker(),
             dmc.Tabs([
                 dmc.TabsList([
@@ -993,6 +1051,7 @@ def save_assessment(n_clicks, collect, athlete_id, demo,
     a = _collect_to_assessment(collect or {})
     redflag_set = {str(x) for x in (redflags or [])}
     redflag_bools = [str(i) in redflag_set for i in range(len(S.RED_FLAGS))]
+    push_opts = list(push_opts or [])
     a.update({
         "athlete_id": int(athlete_id),
         "athlete_name": (name or (demo or {}).get("name") or f"Athlete {athlete_id}").strip(),
@@ -1020,91 +1079,199 @@ def save_assessment(n_clicks, collect, athlete_id, demo,
         "notes": notes or "",
         "examiner": examiner or _get_signed_in_name() or "",
         "examiner_title": examiner_title or "", "examiner_license": examiner_license or "",
+        "push_opts": push_opts,
     })
 
     scores = S.compute_all_scores(a)
 
-    msgs = []
+    # 1) Always save locally first — this is the offline safety net.
     try:
-        new_id = store.save_assessment(a, scores)
+        new_id = store.save_assessment(a, scores, synced=(not push_opts),
+                                       pending_parts=",".join(push_opts))
         a["assessment_id"] = new_id
-        msgs.append(f"Assessment #{new_id} saved locally.")
     except Exception as e:
         traceback.print_exc()
         return err_alert(f"Local save failed: {e}"), no_update, no_update
+    msgs = [f"Assessment #{new_id} saved locally."]
 
-    push_opts = push_opts or []
-    push_errors = []
-    try:
-        msgs += push_to_juvonno(a, scores, "pdf" in push_opts, "csv" in push_opts)
-    except Exception as e:
-        traceback.print_exc()
-        push_errors.append(f"Juvonno push failed: {e}")
+    # 2) Then try to push to Juvonno; failures stay queued for auto-retry.
+    queued = []
+    if push_opts:
+        try:
+            push_msgs, push_errs, failed = push_to_juvonno(a, scores, push_opts)
+        except Exception as e:
+            traceback.print_exc()
+            push_msgs, push_errs, failed = [], [str(e)], list(push_opts)
+        msgs += push_msgs
+        if not failed:
+            store.mark_synced(new_id)
+        else:
+            store.set_pending_parts(new_id, ",".join(failed))
+            queued = push_errs or ["Upload failed"]
 
     pdf_bytes = build_scat6_pdf(a, scores)
     dl = dcc.send_bytes(lambda b: b.write(pdf_bytes), _pdf_name(a))
 
     alerts = [ok_alert([dmc.Text(m, size="sm") for m in msgs])]
-    if push_errors:
-        alerts.append(warn_alert([dmc.Text(m, size="sm") for m in push_errors]))
+    if queued:
+        alerts.append(warn_alert(
+            [dmc.Text(m, size="sm") for m in queued]
+            + [dmc.Text("This assessment is safely stored locally and will upload "
+                        "automatically when the connection to Juvonno returns "
+                        "(or use “Sync now” on the History tab).",
+                        size="sm", fw=600)]))
     return dmc.Stack(alerts, gap="xs"), dl, (hist_tick or 0) + 1
 
-# ───────────────────────── History tab ─────────────────────────
+# ───────────────────────── Clear form ─────────────────────────
 @app.callback(
-    Output("hist-table", "data"), Output("hist-assess-dd", "data"),
-    Output("hist-compare", "children"),
-    Input("history-refresh", "data"), Input("athlete-dd", "value"))
-def refresh_history(_tick, athlete_id):
-    if not athlete_id:
-        return [], [], dmc.Text("Select an athlete to see saved assessments.",
-                                size="sm", c="dimmed")
-    rows = store.list_assessments(int(athlete_id))
-    opts = [{"label": f"#{r['id']} — {r['date_of_examination']} ({r['assessment_type']})",
-             "value": str(r["id"])} for r in rows]
-
-    if not rows:
-        compare = dmc.Text("No saved assessments yet.", size="sm", c="dimmed")
-    else:
-        recs = [store.get_assessment(r["id"]) for r in rows]
-        cols = [{"name": "Domain", "id": "domain"}]
-        data = {label: {"domain": label + (f" (of {mx})" if mx else "")}
-                for label, key, mx in S.DECISION_DOMAINS}
-        for r, rec in zip(rows, recs):
-            col_id = f"a{r['id']}"
-            cols.append({"name": f"{r['date_of_examination']} (#{r['id']})", "id": col_id})
-            merged = {}
-            if rec:
-                merged.update(rec["scores"])
-                merged.update({k: v for k, v in rec["assessment"].items()
-                               if k in ("neuro_exam",)})
-            for label, key, _mx in S.DECISION_DOMAINS:
-                val = merged.get(key)
-                data[label][col_id] = "—" if val in (None, "") else val
-        compare = dash_table.DataTable(
-            columns=cols, data=list(data.values()), page_action="none",
-            style_table={"overflowX": "auto"},
-            style_header={"fontWeight": "600", "backgroundColor": NAVY,
-                          "color": "white", "whiteSpace": "pre-line"},
-            style_cell={"padding": "8px", "fontSize": 13, "textAlign": "center",
-                        "fontFamily": "inherit"},
-            style_cell_conditional=[{"if": {"column_id": "domain"},
-                                     "textAlign": "left", "fontWeight": "500"}],
-        )
-    return rows, opts, compare
-
-@app.callback(Output("dl-pdf", "data", allow_duplicate=True),
-              Output("hist-status", "children", allow_duplicate=True),
-              Input("btn-hist-pdf", "n_clicks"),
-              State("hist-assess-dd", "value"), prevent_initial_call=True)
-def hist_download_pdf(n, assess_id):
-    if not n or not assess_id:
+    Output({"type": "f-sym", "index": ALL}, "value"),
+    Output({"type": "f-obs", "index": ALL}, "value"),
+    Output({"type": "f-cerv", "index": ALL}, "value"),
+    Output({"type": "f-coord", "index": ALL}, "value"),
+    Output({"type": "f-mad", "index": ALL}, "value"),
+    Output({"type": "f-orient", "index": ALL}, "value"),
+    Output({"type": "f-im", "index": ALL}, "checked"),
+    Output({"type": "f-dig", "index": ALL}, "value"),
+    Output({"type": "f-dr", "index": ALL}, "checked"),
+    Output({"type": "f-bg", "index": ALL}, "value"),
+    Output("f-gcs-e", "value"), Output("f-gcs-v", "value"), Output("f-gcs-m", "value"),
+    Output("f-months-secs", "value"), Output("f-months-errs", "value"),
+    Output("f-bess-double", "value"), Output("f-bess-tandem", "value"),
+    Output("f-bess-single", "value"),
+    Output("f-foam-double", "value"), Output("f-foam-tandem", "value"),
+    Output("f-foam-single", "value"),
+    Output("f-tg-1", "value"), Output("f-tg-2", "value"), Output("f-tg-3", "value"),
+    Output("f-dual-1", "value"), Output("f-dual-2", "value"), Output("f-dual-3", "value"),
+    Output("f-dual-errs", "value"),
+    Output("f-redflags", "value"), Output("f-obs-context", "value"),
+    Output("f-foam-toggle", "checked"),
+    Output("f-injury-date", "value"), Output("f-injury-time", "value"),
+    Output("f-time-since", "value"), Output("f-hand", "value"), Output("f-sport", "value"),
+    Output("f-num-conc", "value"), Output("f-recent-conc", "value"),
+    Output("f-recovery-days", "value"), Output("f-primary-symptoms", "value"),
+    Output("f-ocular-desc", "value"), Output("f-bg-notes", "value"),
+    Output("f-medications", "value"),
+    Output("f-worse-phys", "value"), Output("f-worse-ment", "value"),
+    Output("f-pct-normal", "value"), Output("f-pct-why", "value"),
+    Output("f-wordlist", "value"), Output("f-im-time", "value"),
+    Output("f-digitlist", "value"),
+    Output("f-foot", "value"), Output("f-surface", "value"), Output("f-footwear", "value"),
+    Output("f-tg-incomplete", "value"), Output("f-dr-time", "value"),
+    Output("f-neuro", "value"), Output("f-different", "value"),
+    Output("f-diagnosed", "value"), Output("f-notes", "value"),
+    Output("f-examiner-title", "value"), Output("f-examiner-license", "value"),
+    Output("f-exam-date", "value"),
+    Output("f-name", "value", allow_duplicate=True),
+    Output("f-dob", "value", allow_duplicate=True),
+    Output("f-sex", "value", allow_duplicate=True),
+    Input("btn-clear", "n_clicks"),
+    State("demo-store", "data"),
+    prevent_initial_call=True)
+def clear_form(n, demo):
+    if not n:
         raise PreventUpdate
-    rec = store.get_assessment(int(assess_id))
-    if not rec:
-        return no_update, err_alert("Assessment not found.")
-    pdf_bytes = build_scat6_pdf(rec["assessment"], rec["scores"])
-    return (dcc.send_bytes(lambda b: b.write(pdf_bytes), _pdf_name(rec["assessment"])),
-            no_update)
+    sizes = []
+    for grp in ctx.outputs_list[:10]:
+        sizes.append(len(grp) if isinstance(grp, list) else 0)
+    demo = demo or {}
+    sex_map = {"m": "Male", "male": "Male", "f": "Female", "female": "Female"}
+    return (
+        ["0"] * sizes[0],          # symptoms back to 0
+        [None] * sizes[1],         # observable signs
+        [None] * sizes[2],         # cervical
+        [None] * sizes[3],         # coordination
+        [None] * sizes[4],         # maddocks
+        [None] * sizes[5],         # orientation
+        [False] * sizes[6],        # immediate memory checks
+        [None] * sizes[7],         # digits
+        [False] * sizes[8],        # delayed recall checks
+        [None] * sizes[9],         # background
+        None, None, None,          # gcs
+        "", "",                    # months
+        "", "", "",                # mbess
+        "", "", "",                # foam
+        "", "", "",                # tg
+        "", "", "", "",            # dual + errs
+        [], [],                    # redflags, obs-context
+        False,                     # foam toggle
+        "", "", "", None, "",      # injury date/time, time since, hand, sport
+        "", "", "", "",            # concussion history
+        "", "", "",                # ocular desc, bg notes, medications
+        None, None, "", "",        # worse phys/ment, pct, why
+        "A", "", "A",              # word list, im time, digit list
+        None, "", "", "", "",      # foot, surface, footwear, tg incomplete, dr time
+        None, None, None, "",      # decision fields, notes
+        "", "",                    # examiner title / license
+        date.today().isoformat(),  # exam date
+        demo.get("name", ""),      # re-prefill from selected athlete
+        demo.get("dob", ""),
+        sex_map.get(str(demo.get("sex", "")).strip().lower(), None),
+    )
+
+# ───────────────────────── History tab (reads from Juvonno) ─────────────────────────
+HIST_TABLE_COLS = [
+    ("Date", "date_of_examination"), ("Type", "assessment_type"),
+    ("Examiner", "examiner"), ("Symptoms", "symptom_number"),
+    ("Severity", "symptom_severity"), ("Cognitive", "cognitive_total"),
+    ("mBESS", "mbess_total"), ("Tandem fastest", "tg_fastest"),
+    ("Diagnosed", "concussion_diagnosed"),
+]
+
+@app.callback(
+    Output("hist-table-wrap", "children"), Output("hist-compare", "children"),
+    Output("hist-status", "children"),
+    Input("history-refresh", "data"), Input("athlete-dd", "value"),
+    Input("btn-hist-refresh", "n_clicks"))
+def refresh_history(_tick, athlete_id, _n):
+    empty = dmc.Text("Select an athlete to load their SCAT6 history from Juvonno.",
+                     size="sm", c="dimmed")
+    if not athlete_id:
+        return empty, empty, ""
+    try:
+        df, msg = fetch_history_df(int(athlete_id))
+    except Exception as e:
+        traceback.print_exc()
+        return (dmc.Text("Could not reach Juvonno.", size="sm", c="dimmed"),
+                dmc.Text("Could not reach Juvonno.", size="sm", c="dimmed"),
+                err_alert(f"Failed to load history from Juvonno: {e}"))
+    if df is None or df.empty:
+        note = dmc.Text(msg, size="sm", c="dimmed")
+        return note, dmc.Text("No assessments in Juvonno yet.", size="sm", c="dimmed"), ""
+
+    df = df.fillna("")
+    if "date_of_examination" in df.columns:
+        df = df.sort_values("date_of_examination", kind="stable")
+
+    table = dash_table.DataTable(
+        data=[{k: r.get(k, "") for _, k in HIST_TABLE_COLS} for r in
+              df.to_dict("records")],
+        columns=[{"name": n, "id": k} for n, k in HIST_TABLE_COLS],
+        page_action="none",
+        style_table={"overflowX": "auto", "maxHeight": "300px", "overflowY": "auto"},
+        style_header={"fontWeight": "600", "backgroundColor": "#f8f9fa"},
+        style_cell={"padding": "8px", "fontSize": 13, "textAlign": "left",
+                    "fontFamily": "inherit"})
+
+    # Serial comparison straight from the Juvonno CSV
+    cols = [{"name": "Domain", "id": "domain"}]
+    data = {label: {"domain": label + (f" (of {mx})" if mx else "")}
+            for label, key, mx in S.DECISION_DOMAINS}
+    for i, r in enumerate(df.to_dict("records")):
+        col_id = f"c{i}"
+        hdr = str(r.get("date_of_examination", "")) or f"Assessment {i + 1}"
+        cols.append({"name": hdr, "id": col_id})
+        for label, key, _mx in S.DECISION_DOMAINS:
+            val = r.get(key, "")
+            data[label][col_id] = "—" if val in (None, "") else val
+    compare = dash_table.DataTable(
+        columns=cols, data=list(data.values()), page_action="none",
+        style_table={"overflowX": "auto"},
+        style_header={"fontWeight": "600", "backgroundColor": NAVY, "color": "white"},
+        style_cell={"padding": "8px", "fontSize": 13, "textAlign": "center",
+                    "fontFamily": "inherit"},
+        style_cell_conditional=[{"if": {"column_id": "domain"},
+                                 "textAlign": "left", "fontWeight": "500"}])
+    return table, compare, dmc.Text(msg, size="sm", c="dimmed")
 
 @app.callback(Output("dl-csv", "data"),
               Output("hist-status", "children", allow_duplicate=True),
@@ -1113,25 +1280,62 @@ def hist_download_pdf(n, assess_id):
 def hist_download_csv(n, athlete_id):
     if not n or not athlete_id:
         raise PreventUpdate
-    csv_bytes = build_history_csv_bytes(int(athlete_id))
-    return (dcc.send_bytes(lambda b: b.write(csv_bytes), _csv_name(int(athlete_id))),
-            no_update)
-
-@app.callback(Output("hist-status", "children"),
-              Input("btn-hist-push", "n_clicks"),
-              State("hist-assess-dd", "value"), prevent_initial_call=True)
-def hist_push(n, assess_id):
-    if not n or not assess_id:
-        raise PreventUpdate
-    rec = store.get_assessment(int(assess_id))
-    if not rec:
-        return err_alert("Assessment not found.")
+    cid = int(athlete_id)
     try:
-        msgs = push_to_juvonno(rec["assessment"], rec["scores"], True, True)
-        return ok_alert([dmc.Text(m, size="sm") for m in msgs])
+        copies = juv.find_documents_by_name(cid, _csv_name(cid))
+        if not copies:
+            return no_update, warn_alert("No SCAT6 history CSV in Juvonno for this athlete yet.")
+        name, raw = juv.download_customer_document(cid, int(copies[-1].get("id")))
+        fname = name if name.lower().endswith(".csv") else _csv_name(cid)
+        return dcc.send_bytes(lambda b: b.write(raw), fname), no_update
     except Exception as e:
         traceback.print_exc()
-        return err_alert(f"Push failed: {e}")
+        return no_update, err_alert(f"Download from Juvonno failed: {e}")
+
+# ───────────────────────── Offline queue / sync ─────────────────────────
+def _pending_children():
+    pending = store.list_unsynced()
+    if not pending:
+        return dmc.Group([icon("tabler:circle-check", color="green"),
+                          dmc.Text("Nothing pending — all assessments are uploaded.",
+                                   size="sm", c="dimmed")], gap="xs")
+    rows = [{"ID": p["id"], "Athlete": p["athlete_name"],
+             "Date": p["date_of_examination"],
+             "Waiting to upload": p.get("pending_parts") or "pdf,csv",
+             "Saved at (UTC)": p["created_at"]} for p in pending]
+    return dash_table.DataTable(
+        data=rows, columns=[{"name": c, "id": c} for c in rows[0].keys()],
+        page_action="none",
+        style_table={"overflowX": "auto", "maxHeight": "220px", "overflowY": "auto"},
+        style_header={"fontWeight": "600", "backgroundColor": "#fff4e6"},
+        style_cell={"padding": "8px", "fontSize": 13, "textAlign": "left",
+                    "fontFamily": "inherit"})
+
+@app.callback(Output("pending-wrap", "children"), Output("pending-badge", "children"),
+              Output("pending-badge", "style"),
+              Input("history-refresh", "data"))
+def refresh_pending(_tick):
+    n = len(store.list_unsynced())
+    badge_style = {} if n else {"display": "none"}
+    return _pending_children(), f"{n} pending upload{'s' if n != 1 else ''}", badge_style
+
+@app.callback(Output("sync-status", "children"),
+              Output("history-refresh", "data", allow_duplicate=True),
+              Input("btn-sync", "n_clicks"), Input("sync-interval", "n_intervals"),
+              State("history-refresh", "data"),
+              prevent_initial_call=True)
+def run_sync(_n, _i, hist_tick):
+    manual = ctx.triggered_id == "btn-sync"
+    if not store.list_unsynced():
+        if manual:
+            return ok_alert("Nothing to sync — all assessments are uploaded."), no_update
+        raise PreventUpdate
+    synced_n, still_pending, lines = sync_pending()
+    if synced_n == 0 and not manual:
+        raise PreventUpdate  # quiet background retry; don't churn the UI
+    body = [dmc.Text(l, size="sm") for l in lines]
+    alert = ok_alert(body) if still_pending == 0 else warn_alert(body)
+    return alert, (hist_tick or 0) + 1
 
 # ───────────────────────── Juvonno documents (pull) ─────────────────────────
 @app.callback(Output("docs-table-wrap", "children"), Output("docs-dd", "data"),

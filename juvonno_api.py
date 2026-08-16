@@ -457,7 +457,7 @@ def download_customer_document(customer_id: int, document_id: int) -> Tuple[str,
     name = (doc.get("name") or doc.get("filename") or doc.get("file_name")
             or f"document_{document_id}")
     payload = None
-    for key in ("data", "file", "content", "file_data", "base64", "document"):
+    for key in ("filedata", "data", "file", "content", "file_data", "base64", "document"):
         val = doc.get(key)
         if isinstance(val, str) and len(val) > 16:
             payload = val
