@@ -25,6 +25,13 @@ def _require_api_key():
     return True
 
 
+def _redact(text: str) -> str:
+    """Never let the API key appear in error messages / UI alerts."""
+    if API_KEY and text:
+        text = str(text).replace(API_KEY, "***")
+    return str(text)
+
+
 def _get(path: str, **params):
     if not API_KEY:
         raise RuntimeError("API_KEY not configured. Set JUV_API_KEY environment variable.")
@@ -38,18 +45,61 @@ def _get(path: str, **params):
     except requests.exceptions.Timeout:
         raise RuntimeError(f"API request timeout for {path}")
     except requests.exceptions.RequestException as e:
-        raise RuntimeError(f"API request failed for {path}: {e}")
+        raise RuntimeError(_redact(f"API request failed for {path}: {e}"))
 
 
-def _post_multipart(path: str, files: Dict, data: Dict | None = None):
-    """POST multipart/form-data (document upload)."""
+def _post_json(path: str, json_body: Dict | None = None, **params):
+    """POST with API-key auth (used for upload_token)."""
     if not API_KEY:
         raise RuntimeError("API_KEY not configured. Set JUV_API_KEY environment variable.")
     headers = {"x-api-key": API_KEY, "accept": "application/json"}
-    params = {"api_key": API_KEY}
+    params.setdefault("api_key", API_KEY)
+    r = requests.post(f"{BASE}/{path.lstrip('/')}", params=params, headers=headers,
+                      json=(json_body or {}), timeout=15)
+    if not r.ok:
+        raise RuntimeError(_redact(
+            f"POST {path} failed: {r.status_code} {r.reason} — {r.text[:300]}"))
+    try:
+        return r.json()
+    except ValueError:
+        return {"status": "ok", "raw": r.text}
+
+
+def get_document_upload_token(customer_id: int) -> str:
+    """POST /customers/{id}/documents/upload_token → single-use upload token.
+    Per the Juvonno spec, document uploads must use this token (api_token in the
+    multipart body) rather than the api_key."""
+    js = _post_json(f"customers/{int(customer_id)}/documents/upload_token")
+    if isinstance(js, dict):
+        tok = js.get("token") or js.get("api_token") or js.get("upload_token")
+        if not tok:
+            for v in js.values():
+                if isinstance(v, dict) and (v.get("token") or v.get("api_token")):
+                    tok = v.get("token") or v.get("api_token")
+                    break
+        if tok:
+            return str(tok)
+    raise RuntimeError(f"upload_token response had no token (keys: "
+                       f"{list(js.keys()) if isinstance(js, dict) else type(js)})")
+
+
+def _post_multipart(path: str, files: Dict, data: Dict | None = None,
+                    use_api_key: bool = False):
+    """POST multipart/form-data. With use_api_key the api_key is attached
+    (legacy fallback); the spec-compliant document upload authenticates via the
+    api_token inside `data` instead."""
+    headers = {"accept": "application/json"}
+    params = {}
+    if use_api_key:
+        if not API_KEY:
+            raise RuntimeError("API_KEY not configured. Set JUV_API_KEY environment variable.")
+        headers["x-api-key"] = API_KEY
+        params["api_key"] = API_KEY
     r = requests.post(f"{BASE}/{path.lstrip('/')}", params=params, headers=headers,
                       files=files, data=(data or {}), timeout=30)
-    r.raise_for_status()
+    if not r.ok:
+        raise RuntimeError(_redact(
+            f"POST {path} failed: {r.status_code} {r.reason} — {r.text[:300]}"))
     try:
         return r.json()
     except ValueError:
@@ -430,16 +480,34 @@ def download_customer_document(customer_id: int, document_id: int) -> Tuple[str,
 def upload_customer_document(customer_id: int, file_bytes: bytes, filename: str,
                              description: str = "", date: str = "",
                              portal_visible: bool = False) -> Dict:
-    """POST /customers/{id}/documents (multipart)."""
+    """POST /customers/{id}/documents (multipart).
+
+    Spec-compliant two-step flow: first obtain a single-use token from
+    POST /customers/{id}/documents/upload_token, then upload with `api_token`
+    in the form data (no api_key — Juvonno returns 403 otherwise). Falls back
+    to direct api_key auth only if the token endpoint is unavailable."""
     mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-    files = {"file": (filename, file_bytes, mime)}
-    data = {"name": filename}
-    if description:
-        data["description"] = description
-    if date:
-        data["date"] = date
-    data["portal_visible"] = "1" if portal_visible else "0"
-    return _post_multipart(f"customers/{int(customer_id)}/documents", files=files, data=data)
+
+    def _payload():
+        data = {"name": filename, "portal_visible": "1" if portal_visible else "0"}
+        if description:
+            data["description"] = description
+        if date:
+            data["date"] = date
+        return {"file": (filename, file_bytes, mime)}, data
+
+    path = f"customers/{int(customer_id)}/documents"
+    try:
+        token = get_document_upload_token(int(customer_id))
+    except Exception as te:
+        # Older instances without the token endpoint: try legacy direct upload.
+        print(f"upload_token unavailable ({te}); trying direct api_key upload")
+        files, data = _payload()
+        return _post_multipart(path, files=files, data=data, use_api_key=True)
+
+    files, data = _payload()
+    data["api_token"] = token
+    return _post_multipart(path, files=files, data=data, use_api_key=False)
 
 
 def find_document_by_name(customer_id: int, filename: str) -> Optional[Dict]:
