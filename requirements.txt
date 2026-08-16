@@ -7,3 +7,4 @@ requests>=2.31
 reportlab>=4.0
 dash-mantine-components>=2.0
 dash-iconify
+pypdf>=4.0

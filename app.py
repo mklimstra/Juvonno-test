@@ -5,16 +5,16 @@
 # dash-iconify; the original bootstrap Navbar and Footer (layout/) are unchanged.
 #
 # Data flow:
-#   • Juvonno is the source of truth for history — the History tab reads the
-#     athlete's SCAT6_History CSV and document list (older PDFs) from Juvonno.
+#   • Juvonno is the source of truth: each assessment is one timestamped PDF on
+#     the athlete's chart, with the full data embedded inside the PDF metadata.
+#     The History tab lists those PDFs and scrapes them back into tables.
 #   • Local SQLite is the offline safety net: every assessment saves locally
-#     first, then pushes to Juvonno (PDF + appended history CSV). If the push
-#     fails (no internet / API down), the assessment stays queued and is
-#     retried automatically in the background, or manually via "Sync now".
+#     first, then the PDF pushes to Juvonno. If the push fails (no internet /
+#     API down), it stays queued and is retried automatically, or via "Sync now".
 #   • All form inputs persist in the browser (localStorage), so a refresh or
 #     dropped connection mid-intake loses nothing.
-import io, os, base64, traceback
-from datetime import date
+import io, os, base64, functools, traceback
+from datetime import date, datetime
 
 import requests
 import pandas as pd
@@ -30,7 +30,7 @@ from settings import *  # AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLI
 
 import scat6 as S
 import scat6_store as store
-from scat6_pdf import build_scat6_pdf
+from scat6_pdf import build_scat6_pdf, extract_assessment_from_pdf
 import juvonno_api as juv
 
 # ───────────────────────── Constants ─────────────────────────
@@ -107,110 +107,86 @@ def _get_signed_in_name() -> str:
         return ""
 
 # ───────────────────────── Juvonno push helpers ─────────────────────────
-def _csv_name(cid: int) -> str:
-    return f"SCAT6_History_{int(cid)}.csv"
+def _now_local():
+    """Local (Pacific) datetime for exam timestamps."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/Vancouver"))
+    except Exception:
+        return datetime.now()
 
 def _pdf_name(assessment: dict) -> str:
     d = (assessment.get("date_of_examination") or "nodate").replace("/", "-")
-    return f"SCAT6_{d}_athlete{assessment.get('athlete_id', '')}.pdf"
+    t = (assessment.get("time_of_examination") or "").replace(":", "")
+    t_part = f"_{t}" if t else ""
+    return f"SCAT6_{d}{t_part}_athlete{assessment.get('athlete_id', '')}.pdf"
 
-def build_history_csv_bytes(cid: int) -> bytes:
-    """CSV of all locally-stored assessments for the athlete (used only to seed
-    a brand-new history CSV in Juvonno, or rebuild a lost one)."""
-    rows = []
-    for meta in store.list_assessments(int(cid)):
-        rec = store.get_assessment(meta["id"])
-        if rec:
-            rows.append(S.to_flat_record(rec["assessment"], rec["scores"]))
-    df = pd.DataFrame(rows, columns=S.CSV_COLUMNS)
-    return df.to_csv(index=False).encode("utf-8")
-
-def fetch_history_df(cid: int):
-    """Pull the newest SCAT6 history CSV for this athlete from Juvonno.
-    Returns (DataFrame or None, message)."""
-    copies = juv.find_documents_by_name(int(cid), _csv_name(int(cid)))
-    if not copies:
-        return None, "No SCAT6 history CSV found in Juvonno for this athlete yet."
-    _, raw = juv.download_customer_document(int(cid), int(copies[-1].get("id")))
-    df = pd.read_csv(io.BytesIO(raw))
-    return df, f"Loaded {len(df)} assessment(s) from Juvonno ({_csv_name(int(cid))})."
-
-def push_to_juvonno(assessment: dict, scores: dict, parts) -> tuple:
-    """Upload PDF and/or pull-append-reupload the history CSV, per `parts`
-    (iterable containing 'pdf' and/or 'csv'). The steps are independent.
-    Returns (msgs, errors, failed_parts)."""
+def push_to_juvonno(assessment: dict, scores: dict) -> tuple:
+    """Upload the assessment PDF (with embedded data) to the athlete's Juvonno
+    documents. Returns (msgs, errors, failed_parts)."""
     msgs, errors, failed = [], [], []
-    parts = set(parts or [])
     cid = int(assessment["athlete_id"])
     exam_date = assessment.get("date_of_examination") or date.today().isoformat()
-
-    if "pdf" in parts:
-        try:
-            pdf_bytes = build_scat6_pdf(assessment, scores)
-            name = _pdf_name(assessment)
-            juv.upload_customer_document(
-                cid, pdf_bytes, name,
-                description=f"SCAT6 assessment ({assessment.get('assessment_type', '')}) — {exam_date}",
-                date=exam_date)
-            msgs.append(f"PDF uploaded to Juvonno as {name}")
-        except Exception as e:
-            traceback.print_exc()
-            errors.append(f"PDF upload failed: {e}")
-            failed.append("pdf")
-
-    if "csv" in parts:
-        try:
-            csv_name = _csv_name(cid)
-            new_row = S.to_flat_record(assessment, scores)
-            old_copies = juv.find_documents_by_name(cid, csv_name)  # newest last
-            df = pd.DataFrame(columns=S.CSV_COLUMNS)
-            if old_copies:
-                try:
-                    _, raw = juv.download_customer_document(cid, int(old_copies[-1].get("id")))
-                    df = pd.read_csv(io.BytesIO(raw))
-                except Exception as e:
-                    msgs.append(f"Could not read existing history CSV ({e}); "
-                                f"rebuilding from local records")
-            if df.empty:
-                try:
-                    df = pd.read_csv(io.BytesIO(build_history_csv_bytes(cid)))
-                except Exception:
-                    df = pd.DataFrame(columns=S.CSV_COLUMNS)
-            # Append if this assessment_id isn't already present
-            aid = new_row.get("assessment_id")
-            already = (aid and "assessment_id" in df.columns
-                       and (df["assessment_id"].astype(str) == str(aid)).any())
-            if not already:
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-            df = df.reindex(columns=S.CSV_COLUMNS)
-            juv.upload_customer_document(
-                cid, df.to_csv(index=False).encode("utf-8"), csv_name,
-                description="SCAT6 longitudinal history (auto-appended)", date=exam_date)
-            msgs.append(f"History CSV updated in Juvonno "
-                        f"({len(df)} assessment(s) in {csv_name})")
-
-            # Clean up superseded copies where the instance allows DELETE.
-            if old_copies:
-                deleted = sum(
-                    1 for d in old_copies
-                    if d.get("id") is not None
-                    and juv.delete_customer_document(cid, int(d["id"]))
-                )
-                if deleted == len(old_copies):
-                    msgs.append(f"Removed {deleted} superseded history CSV cop(y/ies).")
-                elif deleted:
-                    msgs.append(f"Removed {deleted} of {len(old_copies)} older CSV copies; "
-                                f"Juvonno refused the rest.")
-                else:
-                    msgs.append("Note: Juvonno's API does not allow deleting documents, so "
-                                "older CSV copies remain on the chart — the newest "
-                                f"{csv_name} is always the complete, current history.")
-        except Exception as e:
-            traceback.print_exc()
-            errors.append(f"History CSV update failed: {e}")
-            failed.append("csv")
-
+    try:
+        pdf_bytes = build_scat6_pdf(assessment, scores)
+        name = _pdf_name(assessment)
+        juv.upload_customer_document(
+            cid, pdf_bytes, name,
+            description=f"SCAT6 assessment ({assessment.get('assessment_type', '')}) — {exam_date}",
+            date=exam_date)
+        msgs.append(f"PDF uploaded to Juvonno as {name}")
+    except Exception as e:
+        traceback.print_exc()
+        errors.append(f"PDF upload failed: {e}")
+        failed.append("pdf")
     return msgs, errors, failed
+
+# ───────────────────────── History from Juvonno PDFs ─────────────────────────
+def _is_scat6_pdf(doc: dict) -> bool:
+    name = str(doc.get("name") or doc.get("filename") or doc.get("file_name") or "").lower()
+    return name.startswith("scat6_") and not name.endswith(".csv")
+
+@functools.lru_cache(maxsize=1024)
+def _scraped_doc(cid: int, doc_id: int):
+    """Download one SCAT6 PDF from Juvonno and recover its data (cached —
+    documents in Juvonno are immutable)."""
+    try:
+        _, raw = juv.download_customer_document(int(cid), int(doc_id))
+        return extract_assessment_from_pdf(raw)
+    except Exception as e:
+        print(f"scrape doc {doc_id}: {e}")
+        return None
+
+def fetch_history_records(cid: int):
+    """All SCAT6 assessments for this athlete, reconstructed from the PDFs
+    stored in Juvonno. Returns (records, n_docs, n_unreadable); each record is
+    {'assessment':…, 'scores':…, 'doc_id':…, 'doc_name':…}."""
+    docs = [d for d in juv.list_customer_documents(int(cid)) if _is_scat6_pdf(d)]
+    records, unreadable = [], 0
+    for d in docs:
+        if d.get("id") is None:
+            continue
+        rec = _scraped_doc(int(cid), int(d["id"]))
+        if rec:
+            rec = dict(rec)
+            rec["doc_id"] = int(d["id"])
+            rec["doc_name"] = d.get("name") or d.get("filename") or ""
+            records.append(rec)
+        else:
+            unreadable += 1
+    def _key(r):
+        a = r.get("assessment", {})
+        return (str(a.get("date_of_examination") or ""),
+                str(a.get("time_of_examination") or ""), r.get("doc_id", 0))
+    records.sort(key=_key)
+    return records, len(docs), unreadable
+
+def history_csv_bytes(records) -> bytes:
+    """Flatten Juvonno-scraped records into one longitudinal CSV."""
+    rows = [S.to_flat_record(r.get("assessment", {}), r.get("scores", {}))
+            for r in records]
+    df = pd.DataFrame(rows, columns=S.CSV_COLUMNS)
+    return df.to_csv(index=False).encode("utf-8")
 
 def sync_pending() -> tuple:
     """Push every unsynced assessment to Juvonno. Returns (n_synced, n_still_pending,
@@ -225,12 +201,10 @@ def sync_pending() -> tuple:
             continue
         a = rec["assessment"]
         a["assessment_id"] = meta["id"]
-        parts = [p for p in (meta.get("pending_parts") or "").split(",") if p] \
-            or list(a.get("push_opts") or ["pdf", "csv"])
         try:
-            msgs, errors, failed = push_to_juvonno(a, rec["scores"], parts)
+            msgs, errors, failed = push_to_juvonno(a, rec["scores"])
         except Exception as e:
-            errors, failed = [str(e)], parts
+            errors, failed = [str(e)], ["pdf"]
         label = f"#{meta['id']} {meta.get('athlete_name', '')} ({meta.get('date_of_examination', '')})"
         if not failed:
             store.mark_synced(meta["id"])
@@ -594,11 +568,9 @@ def form_layout():
         section("Score Summary & Save", [
             dmc.Box(id="score-summary"),
             dmc.Divider(my="sm"),
-            dmc.CheckboxGroup(
-                dmc.Group([dmc.Checkbox(label="Upload PDF to Juvonno", value="pdf"),
-                           dmc.Checkbox(label="Update SCAT6 history CSV in Juvonno",
-                                        value="csv")]),
-                id="f-push-opts", value=["pdf", "csv"], mb="sm", **PERSIST),
+            dmc.Checkbox(id="f-push-pdf", checked=True, mb="sm",
+                         label="Upload PDF to Juvonno (the PDF is the athlete's "
+                               "permanent SCAT6 record)", **PERSIST),
             dmc.Group([
                 dmc.Button("Save Assessment", id="btn-save", color="green", size="md",
                            leftSection=icon("tabler:device-floppy")),
@@ -616,11 +588,15 @@ def form_layout():
 
 def history_layout():
     return dmc.Box([
-        section("SCAT6 History (from Juvonno)", [
+        section("SCAT6 History (scraped from Juvonno PDFs)", [
+            dmc.Text("Each saved SCAT6 is a timestamped PDF on the athlete's Juvonno "
+                     "chart with the full assessment data embedded inside it. This "
+                     "table is rebuilt by pulling those PDFs from Juvonno.",
+                     size="sm", c="dimmed", mb="sm"),
             dmc.Group([
                 dmc.Button("Refresh from Juvonno", id="btn-hist-refresh", variant="light",
                            leftSection=icon("tabler:refresh")),
-                dmc.Button("Download history CSV", id="btn-hist-csv", color="blue",
+                dmc.Button("Export history CSV (from PDFs)", id="btn-hist-csv", color="blue",
                            leftSection=icon("tabler:file-type-csv")),
             ], gap="sm", mb="sm"),
             dcc.Loading(dmc.Box(id="hist-table-wrap"), type="circle"),
@@ -629,7 +605,7 @@ def history_layout():
         section("Serial Comparison (SCAT6 Step 6 domains across assessments)", [
             dcc.Loading(dmc.Box(id="hist-compare"), type="circle"),
         ], icon_name="tabler:chart-line"),
-        section("Athlete Documents in Juvonno (older PDFs & CSVs)", [
+        section("Athlete Documents in Juvonno", [
             dmc.Button("Refresh document list", id="btn-docs-refresh", variant="light",
                        leftSection=icon("tabler:refresh"), mb="sm"),
             dcc.Loading(dmc.Box(id="docs-table-wrap"), type="circle"),
@@ -1019,7 +995,7 @@ def live_scores(*_):
     State("f-notes", "value"),
     State("f-examiner", "value"), State("f-examiner-title", "value"),
     State("f-examiner-license", "value"),
-    State("f-push-opts", "value"),
+    State("f-push-pdf", "checked"),
     State("history-refresh", "data"),
     prevent_initial_call=True)
 def save_assessment(n_clicks, collect, athlete_id, demo,
@@ -1033,7 +1009,7 @@ def save_assessment(n_clicks, collect, athlete_id, demo,
                     foot, surface, footwear, tg_incomplete, dual_errs, dr_time,
                     neuro, different, diagnosed, notes,
                     examiner, examiner_title, examiner_license,
-                    push_opts, hist_tick):
+                    push_pdf, hist_tick):
     if not n_clicks:
         raise PreventUpdate
     if not athlete_id:
@@ -1051,7 +1027,6 @@ def save_assessment(n_clicks, collect, athlete_id, demo,
     a = _collect_to_assessment(collect or {})
     redflag_set = {str(x) for x in (redflags or [])}
     redflag_bools = [str(i) in redflag_set for i in range(len(S.RED_FLAGS))]
-    push_opts = list(push_opts or [])
     a.update({
         "athlete_id": int(athlete_id),
         "athlete_name": (name or (demo or {}).get("name") or f"Athlete {athlete_id}").strip(),
@@ -1079,15 +1054,15 @@ def save_assessment(n_clicks, collect, athlete_id, demo,
         "notes": notes or "",
         "examiner": examiner or _get_signed_in_name() or "",
         "examiner_title": examiner_title or "", "examiner_license": examiner_license or "",
-        "push_opts": push_opts,
+        "time_of_examination": _now_local().strftime("%H:%M"),
     })
 
     scores = S.compute_all_scores(a)
 
     # 1) Always save locally first — this is the offline safety net.
     try:
-        new_id = store.save_assessment(a, scores, synced=(not push_opts),
-                                       pending_parts=",".join(push_opts))
+        new_id = store.save_assessment(a, scores, synced=(not push_pdf),
+                                       pending_parts="pdf" if push_pdf else "")
         a["assessment_id"] = new_id
     except Exception as e:
         traceback.print_exc()
@@ -1096,12 +1071,12 @@ def save_assessment(n_clicks, collect, athlete_id, demo,
 
     # 2) Then try to push to Juvonno; failures stay queued for auto-retry.
     queued = []
-    if push_opts:
+    if push_pdf:
         try:
-            push_msgs, push_errs, failed = push_to_juvonno(a, scores, push_opts)
+            push_msgs, push_errs, failed = push_to_juvonno(a, scores)
         except Exception as e:
             traceback.print_exc()
-            push_msgs, push_errs, failed = [], [str(e)], list(push_opts)
+            push_msgs, push_errs, failed = [], [str(e)], ["pdf"]
         msgs += push_msgs
         if not failed:
             store.mark_synced(new_id)
@@ -1228,23 +1203,35 @@ def refresh_history(_tick, athlete_id, _n):
     if not athlete_id:
         return empty, empty, ""
     try:
-        df, msg = fetch_history_df(int(athlete_id))
+        records, n_docs, unreadable = fetch_history_records(int(athlete_id))
     except Exception as e:
         traceback.print_exc()
         return (dmc.Text("Could not reach Juvonno.", size="sm", c="dimmed"),
                 dmc.Text("Could not reach Juvonno.", size="sm", c="dimmed"),
                 err_alert(f"Failed to load history from Juvonno: {e}"))
-    if df is None or df.empty:
-        note = dmc.Text(msg, size="sm", c="dimmed")
-        return note, dmc.Text("No assessments in Juvonno yet.", size="sm", c="dimmed"), ""
+    if not records:
+        note = dmc.Text("No SCAT6 PDFs found on this athlete's Juvonno chart yet.",
+                        size="sm", c="dimmed")
+        status = ""
+        if unreadable:
+            status = warn_alert(f"{unreadable} SCAT6 PDF(s) could not be read "
+                                f"(created before data embedding).")
+        return note, dmc.Text("No assessments in Juvonno yet.", size="sm", c="dimmed"), status
 
-    df = df.fillna("")
-    if "date_of_examination" in df.columns:
-        df = df.sort_values("date_of_examination", kind="stable")
+    def _hdr(rec, i):
+        a = rec.get("assessment", {})
+        d = a.get("date_of_examination") or f"Assessment {i + 1}"
+        t = a.get("time_of_examination") or ""
+        return f"{d} {t}".strip()
 
+    rows = []
+    for i, rec in enumerate(records):
+        merged = {**rec.get("assessment", {}), **rec.get("scores", {})}
+        merged["date_of_examination"] = _hdr(rec, i)
+        rows.append({k: ("—" if merged.get(k) in (None, "") else merged.get(k))
+                     for _, k in HIST_TABLE_COLS})
     table = dash_table.DataTable(
-        data=[{k: r.get(k, "") for _, k in HIST_TABLE_COLS} for r in
-              df.to_dict("records")],
+        data=rows,
         columns=[{"name": n, "id": k} for n, k in HIST_TABLE_COLS],
         page_action="none",
         style_table={"overflowX": "auto", "maxHeight": "300px", "overflowY": "auto"},
@@ -1252,16 +1239,18 @@ def refresh_history(_tick, athlete_id, _n):
         style_cell={"padding": "8px", "fontSize": 13, "textAlign": "left",
                     "fontFamily": "inherit"})
 
-    # Serial comparison straight from the Juvonno CSV
+    # Serial comparison from the scraped PDFs
     cols = [{"name": "Domain", "id": "domain"}]
     data = {label: {"domain": label + (f" (of {mx})" if mx else "")}
             for label, key, mx in S.DECISION_DOMAINS}
-    for i, r in enumerate(df.to_dict("records")):
+    for i, rec in enumerate(records):
         col_id = f"c{i}"
-        hdr = str(r.get("date_of_examination", "")) or f"Assessment {i + 1}"
-        cols.append({"name": hdr, "id": col_id})
+        cols.append({"name": _hdr(rec, i), "id": col_id})
+        merged = {**rec.get("scores", {}),
+                  **{k: v for k, v in rec.get("assessment", {}).items()
+                     if k == "neuro_exam"}}
         for label, key, _mx in S.DECISION_DOMAINS:
-            val = r.get(key, "")
+            val = merged.get(key)
             data[label][col_id] = "—" if val in (None, "") else val
     compare = dash_table.DataTable(
         columns=cols, data=list(data.values()), page_action="none",
@@ -1271,7 +1260,17 @@ def refresh_history(_tick, athlete_id, _n):
                     "fontFamily": "inherit"},
         style_cell_conditional=[{"if": {"column_id": "domain"},
                                  "textAlign": "left", "fontWeight": "500"}])
-    return table, compare, dmc.Text(msg, size="sm", c="dimmed")
+
+    msg = f"Loaded {len(records)} assessment(s) from {n_docs} SCAT6 PDF(s) in Juvonno."
+    partial = sum(1 for r in records if r.get("partial"))
+    if partial:
+        msg += f" {partial} older PDF(s) were text-scraped (scores only)."
+    status = dmc.Text(msg, size="sm", c="dimmed")
+    if unreadable:
+        status = dmc.Stack([status,
+                            warn_alert(f"{unreadable} SCAT6 PDF(s) could not be read.")],
+                           gap="xs")
+    return table, compare, status
 
 @app.callback(Output("dl-csv", "data"),
               Output("hist-status", "children", allow_duplicate=True),
@@ -1282,15 +1281,15 @@ def hist_download_csv(n, athlete_id):
         raise PreventUpdate
     cid = int(athlete_id)
     try:
-        copies = juv.find_documents_by_name(cid, _csv_name(cid))
-        if not copies:
-            return no_update, warn_alert("No SCAT6 history CSV in Juvonno for this athlete yet.")
-        name, raw = juv.download_customer_document(cid, int(copies[-1].get("id")))
-        fname = name if name.lower().endswith(".csv") else _csv_name(cid)
-        return dcc.send_bytes(lambda b: b.write(raw), fname), no_update
+        records, _n_docs, _unreadable = fetch_history_records(cid)
+        if not records:
+            return no_update, warn_alert("No SCAT6 PDFs in Juvonno for this athlete yet.")
+        csv_bytes = history_csv_bytes(records)
+        return (dcc.send_bytes(lambda b: b.write(csv_bytes),
+                               f"SCAT6_History_{cid}.csv"), no_update)
     except Exception as e:
         traceback.print_exc()
-        return no_update, err_alert(f"Download from Juvonno failed: {e}")
+        return no_update, err_alert(f"Building history CSV from Juvonno failed: {e}")
 
 # ───────────────────────── Offline queue / sync ─────────────────────────
 def _pending_children():
@@ -1301,7 +1300,7 @@ def _pending_children():
                                    size="sm", c="dimmed")], gap="xs")
     rows = [{"ID": p["id"], "Athlete": p["athlete_name"],
              "Date": p["date_of_examination"],
-             "Waiting to upload": p.get("pending_parts") or "pdf,csv",
+             "Waiting to upload": p.get("pending_parts") or "pdf",
              "Saved at (UTC)": p["created_at"]} for p in pending]
     return dash_table.DataTable(
         data=rows, columns=[{"name": c, "id": c} for c in rows[0].keys()],
