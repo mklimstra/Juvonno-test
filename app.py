@@ -1240,11 +1240,18 @@ def refresh_history(_tick, athlete_id, _n):
                                 f"(created before data embedding).")
         return note, dmc.Text("No assessments in Juvonno yet.", size="sm", c="dimmed"), status
 
-    def _hdr(rec, i):
+    def _hdr(rec, i, with_type=False):
         a = rec.get("assessment", {})
         d = a.get("date_of_examination") or f"Assessment {i + 1}"
         t = a.get("time_of_examination") or ""
-        return f"{d} {t}".strip()
+        hdr = f"{d} {t}".strip()
+        if with_type:
+            atype = {"baseline": "Baseline",
+                     "post_injury": "Post-injury"}.get(
+                str(a.get("assessment_type") or "").strip(),
+                (a.get("assessment_type") or "").replace("_", "-").title() or "—")
+            hdr += f"\n{atype}"
+        return hdr
 
     rows = []
     for i, rec in enumerate(records):
@@ -1267,7 +1274,7 @@ def refresh_history(_tick, athlete_id, _n):
             for label, key, mx in S.DECISION_DOMAINS}
     for i, rec in enumerate(records):
         col_id = f"c{i}"
-        cols.append({"name": _hdr(rec, i), "id": col_id})
+        cols.append({"name": _hdr(rec, i, with_type=True), "id": col_id})
         merged = {**rec.get("scores", {}),
                   **{k: v for k, v in rec.get("assessment", {}).items()
                      if k == "neuro_exam"}}
@@ -1277,7 +1284,8 @@ def refresh_history(_tick, athlete_id, _n):
     compare = dash_table.DataTable(
         columns=cols, data=list(data.values()), page_action="none",
         style_table={"overflowX": "auto"},
-        style_header={"fontWeight": "600", "backgroundColor": NAVY, "color": "white"},
+        style_header={"fontWeight": "600", "backgroundColor": NAVY, "color": "white",
+                      "whiteSpace": "pre-line"},
         style_cell={"padding": "8px", "fontSize": 13, "textAlign": "center",
                     "fontFamily": "inherit"},
         style_cell_conditional=[{"if": {"column_id": "domain"},
