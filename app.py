@@ -337,13 +337,20 @@ def form_layout():
         # ── Athlete info ──
         section("Athlete Information", [
             dmc.Grid([
-                col(text_input("f-name", "Athlete name")),
+                # Athlete identity fields intentionally do NOT persist — they
+                # stay empty until an athlete is selected from Juvonno.
+                col(dmc.TextInput(id="f-name", label="Athlete name",
+                                  placeholder="Select an athlete above…")),
                 col(dmc.TextInput(id="f-idnum", label="ID number (Juvonno)",
                                   disabled=True), span=2),
-                col(text_input("f-dob", "Date of birth", placeholder="YYYY-MM-DD"), span=3),
+                col(dmc.DatePickerInput(id="f-dob", label="Date of birth",
+                                        clearable=True,
+                                        valueFormat="YYYY-MM-DD",
+                                        leftSection=icon("tabler:calendar", width=16)),
+                    span=3),
                 col(dmc.Select(id="f-sex", label="Sex",
-                               data=["Male", "Female", "Prefer Not To Say", "Other"],
-                               **PERSIST), span=3),
+                               data=["Male", "Female", "Prefer Not To Say", "Other"]),
+                    span=3),
             ], gutter="sm"),
             dmc.Grid([
                 col(dmc.DatePickerInput(id="f-exam-date", label="Date of examination",
@@ -356,10 +363,14 @@ def form_layout():
                                dmc.Radio(label="Suspected/Post-injury", value="post_injury")]),
                     id="f-assess-type", value="post_injury", label="Assessment type",
                     **PERSIST), span=4),
-                col(text_input("f-injury-date", "Date of injury",
-                               placeholder="YYYY-MM-DD"), span=2),
-                col(text_input("f-injury-time", "Time of injury",
-                               placeholder="HH:MM"), span=1),
+                col(dmc.DatePickerInput(id="f-injury-date", label="Date of injury",
+                                        clearable=True, valueFormat="YYYY-MM-DD",
+                                        leftSection=icon("tabler:calendar", width=16),
+                                        **PERSIST), span=2),
+                col(dmc.TimePicker(id="f-injury-time", label="Time of injury",
+                                   withDropdown=True, clearable=True,
+                                   leftSection=icon("tabler:clock", width=16),
+                                   **PERSIST), span=1),
                 col(dmc.Select(id="f-hand", label="Dominant hand",
                                data=["Left", "Right", "Ambidextrous"], **PERSIST), span=2),
             ], gutter="sm"),
@@ -374,8 +385,11 @@ def form_layout():
         section("Concussion History", [
             dmc.Grid([
                 col(num_input("f-num-conc", "Diagnosed concussions in the past", maxv=99), span=3),
-                col(text_input("f-recent-conc", "Most recent concussion",
-                               placeholder="YYYY-MM-DD or description"), span=3),
+                col(dmc.DatePickerInput(id="f-recent-conc",
+                                        label="Most recent concussion",
+                                        clearable=True, valueFormat="YYYY-MM-DD",
+                                        leftSection=icon("tabler:calendar", width=16),
+                                        **PERSIST), span=3),
                 col(num_input("f-recovery-days", "Recovery time (days)", maxv=9999), span=3),
                 col(text_input("f-primary-symptoms", "Primary symptoms"), span=3),
             ], gutter="sm"),
@@ -459,7 +473,10 @@ def form_layout():
                              yn("f-worse-phys")])),
                 col(dmc.Box([dmc.Text("Symptoms worse with mental activity?", size="sm", mb=4),
                              yn("f-worse-ment")])),
-                col(num_input("f-pct-normal", S.PERCENT_NORMAL_QUESTION, maxv=100)),
+                col(dmc.Select(id="f-pct-normal", label=S.PERCENT_NORMAL_QUESTION,
+                               data=[{"label": f"{v}%", "value": str(v)}
+                                     for v in range(100, -1, -5)],
+                               clearable=True, searchable=True, w=180, **PERSIST)),
             ], gutter="sm", mt="sm"),
             textarea("f-pct-why", "If not 100%, why?", minRows=2, mt="xs"),
         ], icon_name="tabler:mood-sick"),
@@ -474,8 +491,10 @@ def form_layout():
                 col(dmc.RadioGroup(
                     dmc.Group([dmc.Radio(label=k, value=k) for k in ("A", "B", "C")]),
                     id="f-wordlist", value="A", label="Word list", **PERSIST)),
-                col(text_input("f-im-time", "Time last trial completed",
-                               placeholder="HH:MM"), span=3),
+                col(dmc.TimePicker(id="f-im-time", label="Time last trial completed",
+                                   withDropdown=True, clearable=True,
+                                   leftSection=icon("tabler:clock", width=16),
+                                   **PERSIST), span=3),
             ], gutter="sm", mb="xs"),
             dmc.Box(id="im-grid"),
         ], icon_name="tabler:list-numbers"),
@@ -532,7 +551,9 @@ def form_layout():
         ], icon_name="tabler:walk"),
 
         section("Off-Field — Step 5: Delayed Recall (≥ 5 min after Immediate Memory)", [
-            text_input("f-dr-time", "Time started", placeholder="HH:MM", w=160, mb="xs"),
+            dmc.TimePicker(id="f-dr-time", label="Time started", withDropdown=True,
+                           clearable=True, w=180, mb="xs",
+                           leftSection=icon("tabler:clock", width=16), **PERSIST),
             dmc.Box(id="dr-grid"),
         ], icon_name="tabler:clock-pause"),
 
@@ -775,7 +796,7 @@ def cascade(branch_id, group_filter):
     prevent_initial_call=True)
 def on_athlete_selected(athlete_id, hist_tick):
     if not athlete_id:
-        return {}, "", "", "", "", None, no_update, (hist_tick or 0) + 1
+        return {}, "", "", "", None, None, no_update, (hist_tick or 0) + 1
     demo = juv.athlete_demographics(int(athlete_id))
     sex_map = {"m": "Male", "male": "Male", "f": "Female", "female": "Female"}
     sex = sex_map.get(str(demo.get("sex", "")).strip().lower(), None)
@@ -790,7 +811,7 @@ def on_athlete_selected(athlete_id, hist_tick):
         color="blue", variant="light", icon=icon("tabler:user-check"), py=8)
     examiner = _get_signed_in_name() or no_update
     return (demo, header, demo.get("name", ""), str(demo["id"]),
-            demo.get("dob", ""), sex, examiner, (hist_tick or 0) + 1)
+            demo.get("dob") or None, sex, examiner, (hist_tick or 0) + 1)
 
 # ───────────────────────── Dynamic grids ─────────────────────────
 @app.callback(Output("im-grid", "children"), Output("dr-grid", "children"),
@@ -1043,7 +1064,8 @@ def save_assessment(n_clicks, collect, athlete_id, demo,
         "background": bg_map, "background_notes": bg_notes or "",
         "medications": medications or "",
         "worse_physical": worse_phys or "", "worse_mental": worse_ment or "",
-        "percent_normal": pct_normal, "percent_normal_why": pct_why or "",
+        "percent_normal": (int(pct_normal) if pct_normal not in (None, "") else None),
+        "percent_normal_why": pct_why or "",
         "word_list": wordlist or "A", "im_time_completed": im_time or "",
         "digit_list": digitlist or "A",
         "foot_tested": foot or "", "test_surface": surface or "", "footwear": footwear or "",
@@ -1169,17 +1191,17 @@ def clear_form(n, demo):
         "", "", "", "",            # dual + errs
         [], [],                    # redflags, obs-context
         False,                     # foam toggle
-        "", "", "", None, "",      # injury date/time, time since, hand, sport
-        "", "", "", "",            # concussion history
+        None, None, "", None, "",  # injury date/time, time since, hand, sport
+        "", None, "", "",          # concussion history (count, recent date, days, symptoms)
         "", "", "",                # ocular desc, bg notes, medications
-        None, None, "", "",        # worse phys/ment, pct, why
-        "A", "", "A",              # word list, im time, digit list
-        None, "", "", "", "",      # foot, surface, footwear, tg incomplete, dr time
+        None, None, None, "",      # worse phys/ment, pct, why
+        "A", None, "A",            # word list, im time, digit list
+        None, "", "", "", None,    # foot, surface, footwear, tg incomplete, dr time
         None, None, None, "",      # decision fields, notes
         "", "",                    # examiner title / license
         date.today().isoformat(),  # exam date
         demo.get("name", ""),      # re-prefill from selected athlete
-        demo.get("dob", ""),
+        demo.get("dob") or None,
         sex_map.get(str(demo.get("sex", "")).strip().lower(), None),
     )
 
