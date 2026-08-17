@@ -3,10 +3,11 @@ import dash_bootstrap_components as dbc
 
 class Navbar():
 
-    def __init__(self, buttons=[], id="navbar"):
+    def __init__(self, buttons=[], id="navbar", brand=None):
         self.buttons = buttons
         self.navlinks = []
         self.id= id
+        self.brand = brand
 
     def nav_item(self, label, url):
         return dbc.NavItem(dbc.NavLink(label, href=url))
@@ -19,7 +20,8 @@ class Navbar():
                     dbc.NavbarBrand(
                         [
                             html.Img(src="assets/img/csi-pacific-logo-reverse.png", height="40px"),
-                            html.Span("Athlete Training Status", className="ms-2 h5 mb-0")
+                            self.brand if self.brand is not None
+                            else html.Span("Athlete Training Status", className="ms-2 h5 mb-0"),
                         ],
                         href="#",
                         className="d-flex align-items-center text-white text-decoration-none"

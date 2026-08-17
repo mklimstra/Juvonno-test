@@ -641,10 +641,10 @@ def form_layout():
 
 def history_layout():
     return dmc.Box([
-        section("SCAT6 History (scraped from Juvonno PDFs)", [
+        section("SCAT6 History", [
             dmc.Text("Each saved SCAT6 is a timestamped PDF on the athlete's Juvonno "
                      "chart with the full assessment data embedded inside it. This "
-                     "table is rebuilt by pulling those PDFs from Juvonno.",
+                     "comparison is rebuilt by pulling those PDFs from Juvonno.",
                      size="sm", c="dimmed", mb="sm"),
             dmc.Group([
                 dmc.Button("Refresh from Juvonno", id="btn-hist-refresh", variant="light",
@@ -652,11 +652,8 @@ def history_layout():
                 dmc.Button("Export history CSV (from PDFs)", id="btn-hist-csv", color="blue",
                            leftSection=icon("tabler:file-type-csv")),
             ], gap="sm", mb="sm"),
-            dcc.Loading(dmc.Box(id="hist-table-wrap"), type="circle"),
-            dmc.Box(id="hist-status", mt="sm"),
-        ], icon_name="tabler:cloud-download"),
-        section("Serial Comparison (SCAT6 Step 6 domains across assessments)", [
             dcc.Loading(dmc.Box(id="hist-compare"), type="circle"),
+            dmc.Box(id="hist-status", mt="sm"),
         ], icon_name="tabler:chart-line"),
         section("Athlete Documents in Juvonno", [
             dmc.Button("Refresh document list", id="btn-docs-refresh", variant="light",
@@ -709,19 +706,21 @@ app.layout = dmc.MantineProvider(
         dcc.Interval(id="user-refresh", interval=60_000, n_intervals=0),
         dcc.Interval(id="sync-interval", interval=120_000, n_intervals=0),
 
-        Navbar([html.Span(id="navbar-user", className="text-white-50 small", children="")]).render(),
+        Navbar(
+            [dmc.Group([
+                dmc.Badge(id="pending-badge", color="orange", variant="light",
+                          leftSection=icon("tabler:cloud-pause", width=12)),
+                html.Span(id="navbar-user", className="text-white-50 small", children=""),
+            ], gap="sm", justify="flex-end")],
+            brand=html.Span(
+                [icon("tabler:first-aid-kit", width=26, color="white"),
+                 html.Span("SCAT6™ Sport Concussion Assessment Tool",
+                           className="ms-2")],
+                className="ms-2 h5 mb-0 d-flex align-items-center"),
+        ).render(),
 
         dmc.Container([
-            dmc.Group([icon("tabler:first-aid-kit", width=30, color=NAVY),
-                       dmc.Title("SCAT6™ Intake Tool", order=2, c=NAVY),
-                       dmc.Badge(id="pending-badge", color="orange", variant="light",
-                                 leftSection=icon("tabler:cloud-pause", width=12))],
-                      gap="xs", mt="md"),
-            dmc.Text("Sport Concussion Assessment Tool 6 — for use by Health Care "
-                     "Professionals. Athletes are loaded from Juvonno; history is read "
-                     "from the athlete's Juvonno documents; assessments filled out "
-                     "offline are queued locally and uploaded when the connection "
-                     "returns.", size="sm", c="dimmed", mb="md"),
+            dmc.Space(h="md"),
             athlete_picker(),
             dmc.Tabs([
                 dmc.TabsList([
@@ -1242,30 +1241,21 @@ def clear_form(n, demo):
     )
 
 # ───────────────────────── History tab (reads from Juvonno) ─────────────────────────
-HIST_TABLE_COLS = [
-    ("Date", "date_of_examination"), ("Type", "assessment_type"),
-    ("Examiner", "examiner"), ("Symptoms", "symptom_number"),
-    ("Severity", "symptom_severity"), ("Cognitive", "cognitive_total"),
-    ("mBESS", "mbess_total"), ("Tandem fastest", "tg_fastest"),
-    ("Diagnosed", "concussion_diagnosed"),
-]
 
 @app.callback(
-    Output("hist-table-wrap", "children"), Output("hist-compare", "children"),
-    Output("hist-status", "children"),
+    Output("hist-compare", "children"), Output("hist-status", "children"),
     Input("history-refresh", "data"), Input("athlete-dd", "value"),
     Input("btn-hist-refresh", "n_clicks"))
 def refresh_history(_tick, athlete_id, _n):
     empty = dmc.Text("Select an athlete to load their SCAT6 history from Juvonno.",
                      size="sm", c="dimmed")
     if not athlete_id:
-        return empty, empty, ""
+        return empty, ""
     try:
         records, n_docs, unreadable = fetch_history_records(int(athlete_id))
     except Exception as e:
         traceback.print_exc()
         return (dmc.Text("Could not reach Juvonno.", size="sm", c="dimmed"),
-                dmc.Text("Could not reach Juvonno.", size="sm", c="dimmed"),
                 err_alert(f"Failed to load history from Juvonno: {e}"))
     if not records:
         note = dmc.Text("No SCAT6 PDFs found on this athlete's Juvonno chart yet.",
@@ -1274,7 +1264,7 @@ def refresh_history(_tick, athlete_id, _n):
         if unreadable:
             status = warn_alert(f"{unreadable} SCAT6 PDF(s) could not be read "
                                 f"(created before data embedding).")
-        return note, dmc.Text("No assessments in Juvonno yet.", size="sm", c="dimmed"), status
+        return note, status
 
     def _when(rec, i):
         a = rec.get("assessment", {})
@@ -1282,25 +1272,16 @@ def refresh_history(_tick, athlete_id, _n):
         t = a.get("time_of_examination") or ""
         return f"{d} {t}".strip()
 
-    body = []
-    for i, rec in enumerate(records):
-        merged = {**rec.get("assessment", {}), **rec.get("scores", {})}
-        row = [dmc.Text(_when(rec, i), size="sm", fw=500),
-               type_badge(merged.get("assessment_type"))]
-        for _, key in HIST_TABLE_COLS[2:]:
-            v = merged.get(key)
-            row.append(dmc.Text("—" if v in (None, "") else str(v), size="sm"))
-        body.append(row)
-    table = m_table([n for n, _ in HIST_TABLE_COLS], body, max_height=320)
-
-    # Serial comparison from the scraped PDFs
-    headers = [dmc.Text("Domain", fw=600, size="sm", c="white")]
+    # One table: SCAT6 Step 6 domains as rows, assessments as columns
+    headers = [dmc.Text("Domain", fw=600, size="sm")]
     for i, rec in enumerate(records):
         headers.append(dmc.Stack([
-            dmc.Text(_when(rec, i), size="sm", fw=600, c="white"),
+            dmc.Text(_when(rec, i), size="sm", fw=600),
             type_badge(rec.get("assessment", {}).get("assessment_type")),
         ], gap=4, align="center"))
     comp_rows = []
+    extra_rows = [("Concussion diagnosed?", "concussion_diagnosed"),
+                  ("Examiner", "examiner")]
     for label, key, mx in S.DECISION_DOMAINS:
         row = [dmc.Text(label + (f" (of {mx})" if mx else ""), size="sm", fw=500)]
         for rec in records:
@@ -1311,8 +1292,15 @@ def refresh_history(_tick, athlete_id, _n):
             row.append(dmc.Text("—" if v in (None, "") else str(v), size="sm",
                                 ta="center"))
         comp_rows.append(row)
-    compare = m_table(headers, comp_rows, navy_header=True, center_body=True,
-                      min_width=520 + 150 * len(records))
+    for label, key in extra_rows:
+        row = [dmc.Text(label, size="sm", fw=500)]
+        for rec in records:
+            v = rec.get("assessment", {}).get(key)
+            row.append(dmc.Text("—" if v in (None, "") else str(v), size="sm",
+                                ta="center"))
+        comp_rows.append(row)
+    compare = m_table(headers, comp_rows, center_body=True, max_height=520,
+                      min_width=420 + 160 * len(records))
 
     msg = f"Loaded {len(records)} assessment(s) from {n_docs} SCAT6 PDF(s) in Juvonno."
     partial = sum(1 for r in records if r.get("partial"))
@@ -1323,7 +1311,7 @@ def refresh_history(_tick, athlete_id, _n):
         status = dmc.Stack([status,
                             warn_alert(f"{unreadable} SCAT6 PDF(s) could not be read.")],
                            gap="xs")
-    return table, compare, status
+    return compare, status
 
 @app.callback(Output("dl-csv", "data"),
               Output("hist-status", "children", allow_duplicate=True),
