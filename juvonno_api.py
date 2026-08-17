@@ -437,6 +437,110 @@ def athlete_demographics(customer_id: int) -> Dict:
     }
 
 
+# ────────── Staff (match logged-in user → Juvonno staff → branches) ──────────
+@functools.lru_cache(maxsize=1)
+def fetch_all_staff() -> List[Dict]:
+    """GET /staff (paginated, 50/page). Cached for the process lifetime."""
+    for endpoint in ("staff", "staff/list"):
+        try:
+            rows = _fetch_all_rows(endpoint, {}, page_size=50, max_pages=100)
+            if rows:
+                return rows
+        except Exception as e:
+            print(f"fetch_all_staff via {endpoint}: {e}")
+    return []
+
+
+@functools.lru_cache(maxsize=256)
+def fetch_staff_detail(staff_id: int) -> Dict:
+    """GET /staff/{id} — used for branch associations."""
+    try:
+        js = _get(f"staff/{int(staff_id)}")
+        if isinstance(js, dict):
+            return js.get("staff", js)
+    except Exception as e:
+        print(f"fetch_staff_detail({staff_id}): {e}")
+    return {}
+
+
+def _staff_name(s: Dict) -> str:
+    first = str(s.get("first_name") or s.get("firstname") or "").strip()
+    last = str(s.get("last_name") or s.get("lastname") or "").strip()
+    return f"{first} {last}".strip() or str(s.get("name") or "").strip()
+
+
+def _staff_email(s: Dict) -> str:
+    for key in ("email", "email_address", "work_email", "username"):
+        v = s.get(key)
+        if isinstance(v, str) and "@" in v:
+            return v.strip().lower()
+    return ""
+
+
+def match_staff(name: str = "", email: str = "") -> Optional[Dict]:
+    """Find the Juvonno staff member for the logged-in user.
+    Match order: exact email → exact full name → last name + first initial."""
+    staff = fetch_all_staff()
+    if not staff:
+        return None
+    email_n = (email or "").strip().lower()
+    name_n = " ".join((name or "").split()).casefold()
+
+    if email_n:
+        for s in staff:
+            if _staff_email(s) == email_n:
+                return s
+    if name_n:
+        for s in staff:
+            if _staff_name(s).casefold() == name_n:
+                return s
+        parts = name_n.split()
+        if len(parts) >= 2:
+            first_i, last = parts[0][:1], parts[-1]
+            for s in staff:
+                sn = _staff_name(s).casefold().split()
+                if sn and sn[-1] == last and sn[0][:1] == first_i:
+                    return s
+    return None
+
+
+def staff_branch_ids(staff_row: Dict) -> List[int]:
+    """Branch/clinic ids associated with a staff member, from the list row plus
+    the staff detail (probing the key shapes Juvonno uses elsewhere)."""
+    ids: set[int] = set()
+
+    def _harvest(obj: Dict):
+        if not isinstance(obj, dict):
+            return
+        bid = _branch_id_from_obj(obj)
+        if bid is not None:
+            ids.add(bid)
+        for key in ("branches", "clinics", "locations", "sites", "branch_ids",
+                    "clinic_ids", "branch_access"):
+            block = obj.get(key)
+            if isinstance(block, list):
+                for item in block:
+                    if isinstance(item, dict) and item.get("id") is not None:
+                        try:
+                            ids.add(int(item["id"]))
+                        except (TypeError, ValueError):
+                            pass
+                    elif isinstance(item, (int, str)):
+                        try:
+                            ids.add(int(item))
+                        except (TypeError, ValueError):
+                            pass
+
+    _harvest(staff_row or {})
+    sid = (staff_row or {}).get("id")
+    if sid is not None:
+        try:
+            _harvest(fetch_staff_detail(int(sid)))
+        except Exception:
+            pass
+    return sorted(ids)
+
+
 # ────────── Encounters (intakes / charts) ──────────
 def list_customer_encounter_ids(customer_id: int) -> List[int]:
     """All encounter IDs (intakes + charts) for a customer.

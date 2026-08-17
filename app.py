@@ -76,36 +76,41 @@ def _name_from_jwt(token: str) -> str:
     except Exception:
         return ""
 
-def _get_signed_in_name() -> str:
+def _get_signed_in_identity() -> dict:
+    """{'name':…, 'email':…} of the logged-in user, from the apps whoami."""
+    out = {"name": "", "email": ""}
     try:
         token = auth.get_token()
         if not token:
-            return ""
-        try:
-            r = requests.get(f"{SITE_URL}/api/csiauth/me/",
-                             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                             timeout=5)
-            if r.status_code == 200:
-                js = r.json()
-                name = f"{(js.get('first_name') or '').strip()} {(js.get('last_name') or '').strip()}".strip() \
-                       or js.get("email", "")
-                if name:
-                    return name
-        except Exception:
-            pass
-        try:
-            r2 = requests.get(f"{SITE_URL}/api/csiauth/me/", params={"access_token": token}, timeout=5)
-            if r2.status_code == 200:
-                js = r2.json()
-                name = f"{(js.get('first_name') or '').strip()} {(js.get('last_name') or '').strip()}".strip() \
-                       or js.get("email", "")
-                if name:
-                    return name
-        except Exception:
-            pass
-        return _name_from_jwt(token) or ""
+            return out
+        for attempt in ("bearer", "param"):
+            try:
+                if attempt == "bearer":
+                    r = requests.get(f"{SITE_URL}/api/csiauth/me/",
+                                     headers={"Authorization": f"Bearer {token}",
+                                              "Accept": "application/json"}, timeout=5)
+                else:
+                    r = requests.get(f"{SITE_URL}/api/csiauth/me/",
+                                     params={"access_token": token}, timeout=5)
+                if r.status_code == 200:
+                    js = r.json()
+                    name = f"{(js.get('first_name') or '').strip()} " \
+                           f"{(js.get('last_name') or '').strip()}".strip()
+                    email = (js.get("email") or "").strip()
+                    if name or email:
+                        out["name"] = name or email
+                        out["email"] = email
+                        return out
+            except Exception:
+                pass
+        out["name"] = _name_from_jwt(token) or ""
+        return out
     except Exception:
-        return ""
+        return out
+
+
+def _get_signed_in_name() -> str:
+    return _get_signed_in_identity().get("name", "")
 
 # ───────────────────────── Juvonno push helpers ─────────────────────────
 def _now_local():
@@ -396,6 +401,7 @@ def athlete_picker():
                         "Loading athletes from Juvonno…")),
         ], gutter="sm"),
         dmc.Text(id="cascade-status", size="sm", c="dimmed", mt="xs"),
+        dmc.Box(id="staff-note", mt="xs"),
         dmc.Box(id="athlete-header", mt="xs"),
     ], icon_name="tabler:user-search")
 
@@ -802,6 +808,7 @@ app.layout = dmc.MantineProvider(
 
         # Stores & downloads
         dcc.Store(id="demo-store", data={}),
+        dcc.Store(id="staff-store", data={}),
         dcc.Store(id="form-collect", data={}),
         dcc.Store(id="history-refresh", data=0),
         dcc.Download(id="dl-pdf"),
@@ -840,6 +847,54 @@ def enforce_session(_n):
     except Exception:
         token = None
     return no_update if token else BASE_ROOT_URL
+
+# ───────────────────────── Staff match → branch restriction ─────────────────────────
+@app.callback(
+    Output("branch-dd", "data"), Output("staff-store", "data"),
+    Output("staff-note", "children"),
+    Input("init-interval", "n_intervals"), Input("user-refresh", "n_intervals"),
+    State("staff-store", "data"))
+def resolve_staff(_i, _n, prev):
+    """Match the logged-in user (whoami name/email) to a Juvonno staff member
+    and limit the branch dropdown to that staff member's branches."""
+    ident = _get_signed_in_identity()
+    if not (ident.get("name") or ident.get("email")):
+        raise PreventUpdate
+    try:
+        staff = juv.match_staff(ident.get("name", ""), ident.get("email", ""))
+    except Exception as e:
+        traceback.print_exc()
+        staff = None
+
+    all_opts = [{"label": o["label"], "value": str(o["value"])}
+                for o in juv.BRANCH_OPTS]
+    if staff is None:
+        data = {"staff_id": None, "staff_name": "", "branch_ids": [],
+                "identity": ident}
+        if prev == data:
+            raise PreventUpdate
+        note = dmc.Text(f"No Juvonno staff match for {ident.get('name') or ident.get('email')} "
+                        f"— showing all branches.", size="xs", c="dimmed")
+        return all_opts, data, note
+
+    sid = staff.get("id")
+    branch_ids = juv.staff_branch_ids(staff)
+    data = {"staff_id": sid, "staff_name": juv._staff_name(staff),
+            "branch_ids": branch_ids, "identity": ident}
+    if prev == data:
+        raise PreventUpdate
+    allowed = {str(b) for b in branch_ids}
+    opts = [o for o in all_opts if o["value"] in allowed] if allowed else all_opts
+    if not opts:  # staff matched but no usable branch overlap — don't lock out
+        opts = all_opts
+    scope = (f"{len(opts)} branch(es)" if allowed and len(opts) != len(all_opts)
+             else "all branches (no branch restriction found on the staff record)")
+    note = dmc.Group([
+        dmc.Badge(f"Juvonno staff #{sid}", color="teal", variant="light", size="sm",
+                  leftSection=icon("tabler:id", width=12)),
+        dmc.Text(f"{juv._staff_name(staff)} — {scope}", size="xs", c="dimmed"),
+    ], gap="xs")
+    return opts, data, note
 
 # ───────────────────────── Tab visibility ─────────────────────────
 # Clientside so tab clicks respond instantly even while the server is busy
@@ -1122,6 +1177,7 @@ def live_scores(*_):
     State("f-examiner", "value"), State("f-examiner-title", "value"),
     State("f-examiner-license", "value"),
     State("f-push-pdf", "checked"),
+    State("staff-store", "data"),
     State("history-refresh", "data"),
     prevent_initial_call=True)
 def save_assessment(n_clicks, collect, athlete_id, demo,
@@ -1135,7 +1191,7 @@ def save_assessment(n_clicks, collect, athlete_id, demo,
                     foot, surface, footwear, tg_incomplete, dual_errs, dr_time,
                     neuro, different, diagnosed, notes,
                     examiner, examiner_title, examiner_license,
-                    push_pdf, hist_tick):
+                    push_pdf, staff_data, hist_tick):
     if not n_clicks:
         raise PreventUpdate
     if not athlete_id:
@@ -1181,6 +1237,7 @@ def save_assessment(n_clicks, collect, athlete_id, demo,
         "notes": notes or "",
         "examiner": examiner or _get_signed_in_name() or "",
         "examiner_title": examiner_title or "", "examiner_license": examiner_license or "",
+        "examiner_staff_id": (staff_data or {}).get("staff_id"),
         "time_of_examination": _now_local().strftime("%H:%M"),
     })
 
