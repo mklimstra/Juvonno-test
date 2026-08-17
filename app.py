@@ -722,9 +722,14 @@ def history_layout():
                      "intakes/charts with “SCAT” in the template name and shows their "
                      "raw JSON, so the field mapping can be tuned to your templates.",
                      size="sm", c="dimmed", mb="sm"),
-            dmc.Button("Scan encounters for SCAT intakes", id="btn-scan-scat",
-                       variant="light", color="grape",
-                       leftSection=icon("tabler:radar-2"), mb="sm"),
+            dmc.Group([
+                dmc.Button("Scan encounters for SCAT intakes", id="btn-scan-scat",
+                           variant="light", color="grape",
+                           leftSection=icon("tabler:radar-2")),
+                dmc.Button("Show my staff record (JSON)", id="btn-staff-json",
+                           variant="light", color="teal",
+                           leftSection=icon("tabler:id")),
+            ], gap="sm", mb="sm"),
             loading(dmc.Box(id="scat-enc-wrap"), "Scanning encounters in Juvonno…"),
             dmc.Group([
                 dmc.Select(id="scat-enc-dd", placeholder="Pick an intake to view its JSON…",
@@ -1628,6 +1633,37 @@ def show_scat_json(eid):
     except Exception as e:
         traceback.print_exc()
         return err_alert(f"Could not fetch encounter {eid}: {e}"), ""
+
+@app.callback(Output("scat-json-wrap", "children", allow_duplicate=True),
+              Output("scat-json-copy", "content", allow_duplicate=True),
+              Input("btn-staff-json", "n_clicks"),
+              State("staff-store", "data"), prevent_initial_call=True)
+def show_staff_json(n, staff_data):
+    if not n:
+        raise PreventUpdate
+    try:
+        sid = (staff_data or {}).get("staff_id")
+        if sid is None:
+            ident = _get_signed_in_identity()
+            staff = juv.match_staff(ident.get("name", ""), ident.get("email", ""))
+            sid = (staff or {}).get("id")
+        if sid is None:
+            return warn_alert("No Juvonno staff match for the logged-in user."), ""
+        detail = juv.fetch_staff_detail(int(sid))
+        payload = {"staff_id": sid,
+                   "branch_ids_extracted": juv.staff_branch_ids({"id": sid}),
+                   "staff_detail": detail}
+        pretty = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+        view = html.Pre(pretty, style={
+            "maxHeight": "420px", "overflow": "auto", "fontSize": "12px",
+            "background": "var(--mantine-color-gray-0)",
+            "border": "1px solid var(--mantine-color-gray-3)",
+            "borderRadius": "8px", "padding": "12px",
+            "whiteSpace": "pre-wrap", "wordBreak": "break-word"})
+        return view, pretty
+    except Exception as e:
+        traceback.print_exc()
+        return err_alert(f"Could not fetch staff record: {e}"), ""
 
 # ───────────────────────── Main ─────────────────────────
 if __name__ == "__main__":

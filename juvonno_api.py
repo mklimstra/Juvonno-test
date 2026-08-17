@@ -453,14 +453,21 @@ def fetch_all_staff() -> List[Dict]:
 
 @functools.lru_cache(maxsize=256)
 def fetch_staff_detail(staff_id: int) -> Dict:
-    """GET /staff/{id} — used for branch associations."""
-    try:
-        js = _get(f"staff/{int(staff_id)}")
-        if isinstance(js, dict):
-            return js.get("staff", js)
-    except Exception as e:
-        print(f"fetch_staff_detail({staff_id}): {e}")
-    return {}
+    """GET /staff/{id} — the detail record carries the FULL branch list (the
+    /staff list rows only show the default branch). Include variants are
+    probed and merged, since deployments differ on what needs requesting."""
+    merged: Dict = {}
+    for params in ({}, {"include": "branches"}, {"include": "full"}):
+        try:
+            js = _get(f"staff/{int(staff_id)}", **params)
+            obj = js.get("staff", js) if isinstance(js, dict) else {}
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k not in merged or (v and not merged.get(k)):
+                        merged[k] = v
+        except Exception:
+            continue
+    return merged
 
 
 def _staff_name(s: Dict) -> str:
@@ -504,41 +511,60 @@ def match_staff(name: str = "", email: str = "") -> Optional[Dict]:
     return None
 
 
+_BRANCH_KEY_TOKENS = ("branch", "clinic", "location", "site")
+
+
+def _branch_name_to_id() -> Dict[str, int]:
+    return {name.casefold().strip(): bid for bid, name in BRANCH_NAME_BY_ID.items()}
+
+
+def _harvest_branch_ids(node, ids: set, name_map: Dict[str, int],
+                        under_branch_key: bool = False):
+    """Recursively scan any structure, collecting ids wherever a key mentions
+    branch/clinic/location/site. Handles dicts with id, bare ints, numeric
+    strings, and branch NAMES (mapped back to ids via the known branch list)."""
+    if isinstance(node, dict):
+        if under_branch_key and node.get("id") is not None:
+            try:
+                ids.add(int(node["id"]))
+            except (TypeError, ValueError):
+                pass
+        for k, v in node.items():
+            kl = str(k).lower()
+            k_is_branchy = any(t in kl for t in _BRANCH_KEY_TOKENS)
+            _harvest_branch_ids(v, ids, name_map, under_branch_key=k_is_branchy)
+    elif isinstance(node, list):
+        for item in node:
+            _harvest_branch_ids(item, ids, name_map, under_branch_key=under_branch_key)
+    elif under_branch_key:
+        if isinstance(node, int):
+            ids.add(node)
+        elif isinstance(node, str):
+            s = node.strip()
+            if s.isdigit():
+                ids.add(int(s))
+            else:
+                bid = name_map.get(s.casefold())
+                if bid is not None:
+                    ids.add(bid)
+
+
 def staff_branch_ids(staff_row: Dict) -> List[int]:
-    """Branch/clinic ids associated with a staff member, from the list row plus
-    the staff detail (probing the key shapes Juvonno uses elsewhere)."""
+    """ALL branch/clinic ids associated with a staff member. The /staff list
+    row only exposes the default branch, so GET /staff/{id} is the primary
+    source; the whole detail object is scanned recursively."""
     ids: set[int] = set()
-
-    def _harvest(obj: Dict):
-        if not isinstance(obj, dict):
-            return
-        bid = _branch_id_from_obj(obj)
-        if bid is not None:
-            ids.add(bid)
-        for key in ("branches", "clinics", "locations", "sites", "branch_ids",
-                    "clinic_ids", "branch_access"):
-            block = obj.get(key)
-            if isinstance(block, list):
-                for item in block:
-                    if isinstance(item, dict) and item.get("id") is not None:
-                        try:
-                            ids.add(int(item["id"]))
-                        except (TypeError, ValueError):
-                            pass
-                    elif isinstance(item, (int, str)):
-                        try:
-                            ids.add(int(item))
-                        except (TypeError, ValueError):
-                            pass
-
-    _harvest(staff_row or {})
+    name_map = _branch_name_to_id()
     sid = (staff_row or {}).get("id")
     if sid is not None:
         try:
-            _harvest(fetch_staff_detail(int(sid)))
-        except Exception:
-            pass
-    return sorted(ids)
+            detail = fetch_staff_detail(int(sid))
+            _harvest_branch_ids(detail, ids, name_map)
+        except Exception as e:
+            print(f"staff_branch_ids detail({sid}): {e}")
+    # list row contributes the default branch as a floor
+    _harvest_branch_ids(staff_row or {}, ids, name_map)
+    return sorted(i for i in ids if i > 0)
 
 
 # ────────── Encounters (intakes / charts) ──────────
