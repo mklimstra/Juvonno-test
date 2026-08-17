@@ -439,14 +439,16 @@ def athlete_demographics(customer_id: int) -> Dict:
 
 # ────────── Encounters (intakes / charts) ──────────
 def list_customer_encounter_ids(customer_id: int) -> List[int]:
-    """All encounter IDs (intakes + charts) for a customer. Juvonno deployments
-    differ on the query-param spelling, so several variants are probed."""
+    """All encounter IDs (intakes + charts) for a customer.
+
+    Note: the SwaggerHub spec shows `customerId` for the intakes endpoint, but
+    the live API actually filters on `customer_id` (confirmed against
+    csipacific.juvonno.com) — using the wrong spelling risks an unfiltered
+    response, so only the verified param is sent."""
     ids: set[int] = set()
     for path, params in (
-        ("encounters/intakes", {"customerId": customer_id}),
         ("encounters/intakes", {"customer_id": customer_id}),
         ("encounters/charts", {"customer_id": customer_id}),
-        ("encounters/charts", {"customerId": customer_id}),
     ):
         try:
             js = _get(path, **params)
