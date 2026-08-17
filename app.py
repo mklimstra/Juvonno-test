@@ -1330,7 +1330,8 @@ def refresh_history(_tick, athlete_id, _n):
             type_badge(rec.get("assessment", {}).get("assessment_type")),
         ], gap=4, align="center"))
     comp_rows = []
-    extra_rows = [("Concussion diagnosed?", "concussion_diagnosed"),
+    extra_rows = [("K-D total time (s)", "kd_total_time"),
+                  ("Concussion diagnosed?", "concussion_diagnosed"),
                   ("Examiner", "examiner")]
     for label, key, mx in S.DECISION_DOMAINS:
         row = [dmc.Text(label + (f" (of {mx})" if mx else ""), size="sm", fw=500)]
