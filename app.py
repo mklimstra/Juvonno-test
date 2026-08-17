@@ -31,6 +31,7 @@ from settings import *  # AUTH_URL, TOKEN_URL, APP_URL, SITE_URL, CLIENT_ID, CLI
 import scat6 as S
 import scat6_store as store
 from scat6_pdf import build_scat6_pdf, extract_assessment_from_pdf
+from scat6_encounter import parse_scat6_encounter
 import juvonno_api as juv
 
 # ───────────────────────── Constants ─────────────────────────
@@ -157,12 +158,26 @@ def _scraped_doc(cid: int, doc_id: int):
         print(f"scrape doc {doc_id}: {e}")
         return None
 
+@functools.lru_cache(maxsize=2048)
+def _scraped_encounter(encounter_id: int):
+    """Fetch one Juvonno encounter and parse it as a SCAT6 intake (cached)."""
+    try:
+        enc = juv.fetch_encounter(int(encounter_id))
+        return parse_scat6_encounter(enc, int(encounter_id))
+    except Exception as e:
+        print(f"parse encounter {encounter_id}: {e}")
+        return None
+
 def fetch_history_records(cid: int):
-    """All SCAT6 assessments for this athlete, reconstructed from the PDFs
-    stored in Juvonno. Returns (records, n_docs, n_unreadable); each record is
-    {'assessment':…, 'scores':…, 'doc_id':…, 'doc_name':…}."""
-    docs = [d for d in juv.list_customer_documents(int(cid)) if _is_scat6_pdf(d)]
+    """All SCAT6 assessments for this athlete from Juvonno — both the PDFs this
+    app uploaded AND any SCAT6 intakes/charts filled out inside Juvonno itself
+    (their fields are scraped and the scores recalculated).
+    Returns (records, n_docs, n_unreadable, n_intakes); each record carries
+    'source': 'pdf' | 'intake'."""
     records, unreadable = [], 0
+
+    # 1) PDFs uploaded by this app
+    docs = [d for d in juv.list_customer_documents(int(cid)) if _is_scat6_pdf(d)]
     for d in docs:
         if d.get("id") is None:
             continue
@@ -171,15 +186,32 @@ def fetch_history_records(cid: int):
             rec = dict(rec)
             rec["doc_id"] = int(d["id"])
             rec["doc_name"] = d.get("name") or d.get("filename") or ""
+            rec["source"] = "pdf"
             records.append(rec)
         else:
             unreadable += 1
+
+    # 2) SCAT6 intakes / charts completed inside Juvonno
+    n_intakes = 0
+    try:
+        for eid in juv.list_customer_encounter_ids(int(cid)):
+            rec = _scraped_encounter(int(eid))
+            if rec:
+                rec = dict(rec)
+                rec["source"] = "intake"
+                rec["encounter_id"] = int(eid)
+                records.append(rec)
+                n_intakes += 1
+    except Exception as e:
+        print(f"encounter scan for customer {cid}: {e}")
+
     def _key(r):
         a = r.get("assessment", {})
         return (str(a.get("date_of_examination") or ""),
-                str(a.get("time_of_examination") or ""), r.get("doc_id", 0))
+                str(a.get("time_of_examination") or ""),
+                r.get("doc_id", r.get("encounter_id", 0)))
     records.sort(key=_key)
-    return records, len(docs), unreadable
+    return records, len(docs), unreadable, n_intakes
 
 def history_csv_bytes(records) -> bytes:
     """Flatten Juvonno-scraped records into one longitudinal CSV."""
@@ -1252,7 +1284,7 @@ def refresh_history(_tick, athlete_id, _n):
     if not athlete_id:
         return empty, ""
     try:
-        records, n_docs, unreadable = fetch_history_records(int(athlete_id))
+        records, n_docs, unreadable, n_intakes = fetch_history_records(int(athlete_id))
     except Exception as e:
         traceback.print_exc()
         return (dmc.Text("Could not reach Juvonno.", size="sm", c="dimmed"),
@@ -1299,10 +1331,20 @@ def refresh_history(_tick, athlete_id, _n):
             row.append(dmc.Text("—" if v in (None, "") else str(v), size="sm",
                                 ta="center"))
         comp_rows.append(row)
+    src_row = [dmc.Text("Source", size="sm", fw=500)]
+    for rec in records:
+        if rec.get("source") == "intake":
+            src_row.append(dmc.Badge("Juvonno intake", color="grape",
+                                     variant="light", size="sm"))
+        else:
+            src_row.append(dmc.Badge("App PDF", color="blue",
+                                     variant="light", size="sm"))
+    comp_rows.append(src_row)
     compare = m_table(headers, comp_rows, center_body=True, max_height=520,
                       min_width=420 + 160 * len(records))
 
-    msg = f"Loaded {len(records)} assessment(s) from {n_docs} SCAT6 PDF(s) in Juvonno."
+    msg = (f"Loaded {len(records)} assessment(s) from Juvonno — "
+           f"{len(records) - n_intakes} app PDF(s), {n_intakes} Juvonno intake(s).")
     partial = sum(1 for r in records if r.get("partial"))
     if partial:
         msg += f" {partial} older PDF(s) were text-scraped (scores only)."
@@ -1322,7 +1364,7 @@ def hist_download_csv(n, athlete_id):
         raise PreventUpdate
     cid = int(athlete_id)
     try:
-        records, _n_docs, _unreadable = fetch_history_records(cid)
+        records, _n_docs, _unreadable, _n_intakes = fetch_history_records(cid)
         if not records:
             return no_update, warn_alert("No SCAT6 PDFs in Juvonno for this athlete yet.")
         csv_bytes = history_csv_bytes(records)

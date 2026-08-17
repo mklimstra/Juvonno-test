@@ -437,6 +437,70 @@ def athlete_demographics(customer_id: int) -> Dict:
     }
 
 
+# ────────── Encounters (intakes / charts) ──────────
+def list_customer_encounter_ids(customer_id: int) -> List[int]:
+    """All encounter IDs (intakes + charts) for a customer. Juvonno deployments
+    differ on the query-param spelling, so several variants are probed."""
+    ids: set[int] = set()
+    for path, params in (
+        ("encounters/intakes", {"customerId": customer_id}),
+        ("encounters/intakes", {"customer_id": customer_id}),
+        ("encounters/charts", {"customer_id": customer_id}),
+        ("encounters/charts", {"customerId": customer_id}),
+    ):
+        try:
+            js = _get(path, **params)
+        except Exception:
+            continue
+        stack = [js]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, list):
+                for v in node:
+                    if isinstance(v, (int, str)):
+                        try:
+                            ids.add(int(v))
+                        except (TypeError, ValueError):
+                            pass
+                    elif isinstance(v, dict):
+                        if v.get("id") is not None:
+                            try:
+                                ids.add(int(v["id"]))
+                            except (TypeError, ValueError):
+                                pass
+            elif isinstance(node, dict):
+                for key in ("list", "intakes", "charts", "results", "data", "ids"):
+                    if key in node:
+                        stack.append(node[key])
+    return sorted(ids)
+
+
+@functools.lru_cache(maxsize=2048)
+def fetch_encounter(encounter_id: int) -> Dict:
+    """GET /encounters/{id} → encounter object (with template + fields)."""
+    try:
+        js = _get(f"encounters/{int(encounter_id)}")
+        if isinstance(js, dict):
+            enc = js.get("encounter", js)
+            # Some instances need include=fields to return the field values
+            def _has_fields(e):
+                data = e.get("data")
+                return isinstance(data, list) and any(
+                    isinstance(b, dict) and b.get("fields") for b in data)
+            if isinstance(enc, dict) and not _has_fields(enc):
+                try:
+                    js2 = _get(f"encounters/{int(encounter_id)}", include="fields")
+                    enc2 = js2.get("encounter", js2) if isinstance(js2, dict) else {}
+                    if isinstance(enc2, dict) and _has_fields(enc2):
+                        return enc2
+                except Exception:
+                    pass
+            return enc if isinstance(enc, dict) else {}
+    except Exception as e:
+        print(f"fetch_encounter({encounter_id}): {e}")
+    return {}
+
+
 # ────────── Customer documents (push / pull) ──────────
 def list_customer_documents(customer_id: int) -> List[Dict]:
     """GET /customers/{id}/documents → list of document dicts."""
