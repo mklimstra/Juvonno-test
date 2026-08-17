@@ -248,6 +248,18 @@ def sync_pending() -> tuple:
     return synced_n, len(store.list_unsynced()), lines
 
 # ───────────────────────── Small UI builders ─────────────────────────
+def loading(children, label="Loading…"):
+    """dcc.Loading with a Mantine dots loader + label instead of the circle."""
+    return dcc.Loading(
+        children,
+        custom_spinner=dmc.Group(
+            [dmc.Loader(size="sm", color="indigo", type="dots"),
+             dmc.Text(label, size="sm", c="dimmed")],
+            gap="xs", justify="center", my="md"),
+        delay_show=150, delay_hide=100,
+        overlay_style={"visibility": "visible", "opacity": 0.35})
+
+
 def ok_alert(children):
     return dmc.Alert(children, color="green", variant="light",
                      icon=icon("tabler:circle-check"))
@@ -377,11 +389,11 @@ def athlete_picker():
                            placeholder="Filter by group (optional)…", searchable=True,
                            clearable=True, disabled=True,
                            leftSection=icon("tabler:users-group", width=16))),
-            col(dcc.Loading(dmc.Select(id="athlete-dd", label="Athlete",
-                                       placeholder="Select a branch first…",
-                                       searchable=True, clearable=True, disabled=True,
-                                       leftSection=icon("tabler:user", width=16)),
-                            type="circle")),
+            col(loading(dmc.Select(id="athlete-dd", label="Athlete",
+                                   placeholder="Select a branch first…",
+                                   searchable=True, clearable=True, disabled=True,
+                                   leftSection=icon("tabler:user", width=16)),
+                        "Loading athletes from Juvonno…")),
         ], gutter="sm"),
         dmc.Text(id="cascade-status", size="sm", c="dimmed", mt="xs"),
         dmc.Box(id="athlete-header", mt="xs"),
@@ -667,7 +679,7 @@ def form_layout():
                      "reached, the assessment is saved locally and uploaded "
                      "automatically when the connection returns.",
                      size="xs", c="dimmed", mt="xs"),
-            dcc.Loading(dmc.Box(id="save-status", mt="sm"), type="circle"),
+            loading(dmc.Box(id="save-status", mt="sm"), "Saving & uploading to Juvonno…"),
         ], icon_name="tabler:sum", color="#1d5b3c"),
     ])
 
@@ -684,13 +696,13 @@ def history_layout():
                 dmc.Button("Export history CSV (from PDFs)", id="btn-hist-csv", color="blue",
                            leftSection=icon("tabler:file-type-csv")),
             ], gap="sm", mb="sm"),
-            dcc.Loading(dmc.Box(id="hist-compare"), type="circle"),
+            loading(dmc.Box(id="hist-compare"), "Pulling SCAT6 history from Juvonno…"),
             dmc.Box(id="hist-status", mt="sm"),
         ], icon_name="tabler:chart-line"),
         section("Athlete Documents in Juvonno", [
             dmc.Button("Refresh document list", id="btn-docs-refresh", variant="light",
                        leftSection=icon("tabler:refresh"), mb="sm"),
-            dcc.Loading(dmc.Box(id="docs-table-wrap"), type="circle"),
+            loading(dmc.Box(id="docs-table-wrap"), "Listing documents in Juvonno…"),
             dmc.Group([
                 dmc.Select(id="docs-dd", placeholder="Pick a document to download…",
                            searchable=True, clearable=True, w=380),
@@ -707,7 +719,7 @@ def history_layout():
             dmc.Button("Scan encounters for SCAT intakes", id="btn-scan-scat",
                        variant="light", color="grape",
                        leftSection=icon("tabler:radar-2"), mb="sm"),
-            dcc.Loading(dmc.Box(id="scat-enc-wrap"), type="circle"),
+            loading(dmc.Box(id="scat-enc-wrap"), "Scanning encounters in Juvonno…"),
             dmc.Group([
                 dmc.Select(id="scat-enc-dd", placeholder="Pick an intake to view its JSON…",
                            searchable=True, clearable=True, w=380),
@@ -727,7 +739,7 @@ def history_layout():
                 dmc.Button("Sync now", id="btn-sync", color="orange",
                            leftSection=icon("tabler:cloud-upload")),
             ], gap="sm", mt="sm"),
-            dcc.Loading(dmc.Box(id="sync-status", mt="sm"), type="circle"),
+            loading(dmc.Box(id="sync-status", mt="sm"), "Syncing pending uploads…"),
         ], icon_name="tabler:cloud-pause"),
     ])
 
@@ -830,12 +842,20 @@ def enforce_session(_n):
     return no_update if token else BASE_ROOT_URL
 
 # ───────────────────────── Tab visibility ─────────────────────────
-@app.callback(Output("pane-form", "style"), Output("pane-history", "style"),
-              Input("main-tabs", "value"))
-def toggle_panes(which):
-    if which == "tab-history":
-        return {"display": "none"}, {"display": "block"}
-    return {"display": "block"}, {"display": "none"}
+# Clientside so tab clicks respond instantly even while the server is busy
+# pulling from Juvonno (this was the "nothing happens" hang).
+from dash import clientside_callback, ClientsideFunction  # noqa: E402
+clientside_callback(
+    """
+    function(which) {
+        if (which === 'tab-history') {
+            return [{display: 'none'}, {display: 'block'}];
+        }
+        return [{display: 'block'}, {display: 'none'}];
+    }
+    """,
+    Output("pane-form", "style"), Output("pane-history", "style"),
+    Input("main-tabs", "value"))
 
 # ───────────────────────── Athlete cascade ─────────────────────────
 @app.callback(
