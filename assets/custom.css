@@ -2,3 +2,21 @@
 body {
   padding-bottom: 100px;  /* ← adjust to your footer’s actual height */
 }
+/* ── Mobile: stop iOS Safari from zooming the page when an input is focused.
+   Safari only auto-zooms when the focused control's font-size is < 16px, so on
+   touch devices we render all form controls at 16px. ── */
+@media (pointer: coarse) {
+  input,
+  select,
+  textarea,
+  .mantine-Input-input,
+  .mantine-InputBase-input,
+  .mantine-Select-input,
+  .mantine-NumberInput-input,
+  .mantine-Textarea-input,
+  .mantine-TimePicker-input,
+  .mantine-DatePickerInput-input,
+  .mantine-SegmentedControl-label {
+    font-size: 16px !important;
+  }
+}

@@ -264,6 +264,38 @@ def qtable(rows):
                      for q, a in rows])],
         striped=True, verticalSpacing="xs", withTableBorder=False)
 
+def m_table(header_cells, body_rows, navy_header=False, max_height=None,
+            min_width=640, first_col_bold=False, center_body=False):
+    """Read-only Mantine-styled table (dmc.Table) with scroll + sticky header."""
+    hstyle = ({"background": NAVY, "color": "white"} if navy_header
+              else {"background": "var(--mantine-color-gray-1)"})
+    thead = dmc.TableThead(dmc.TableTr([dmc.TableTh(c, style=hstyle)
+                                        for c in header_cells]))
+    trs = []
+    for r in body_rows:
+        tds = []
+        for j, cval in enumerate(r):
+            if not isinstance(cval, (dict,)) and not hasattr(cval, "to_plotly_json"):
+                cval = dmc.Text("—" if cval in (None, "") else str(cval), size="sm",
+                                fw=600 if (j == 0 and first_col_bold) else None)
+            style = {"textAlign": "center"} if (center_body and j > 0) else None
+            tds.append(dmc.TableTd(cval, style=style))
+        trs.append(dmc.TableTr(tds))
+    table = dmc.Table([thead, dmc.TableTbody(trs)], striped=True,
+                      highlightOnHover=True, withTableBorder=True,
+                      verticalSpacing="xs", horizontalSpacing="md",
+                      stickyHeader=bool(max_height))
+    return dmc.TableScrollContainer(table, minWidth=min_width,
+                                    maxHeight=max_height, type="native")
+
+_TYPE_BADGE = {"baseline": ("Baseline", "teal"), "post_injury": ("Post-injury", "orange")}
+
+def type_badge(atype):
+    label, color = _TYPE_BADGE.get(str(atype or "").strip(),
+                                   ((str(atype).replace("_", "-").title() or "—")
+                                    if atype else "—", "gray"))
+    return dmc.Badge(label, color=color, variant="light", size="sm")
+
 def _word_grid(list_key: str, comp_type: str, trials: int):
     """Checkbox grid: words × trials (immediate memory) or words × 1 (delayed recall)."""
     words = S.WORD_LISTS.get(list_key or "A", S.WORD_LISTS["A"])
@@ -661,6 +693,10 @@ app = Dash(
         "https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css",
     ],
     suppress_callback_exceptions=True,
+    # Proper mobile viewport; input font sizing that stops iOS focus-zoom is in
+    # assets/custom.css.
+    meta_tags=[{"name": "viewport",
+                "content": "width=device-width, initial-scale=1"}],
 )
 app.title = "SCAT6 Intake — CSI Pacific"
 
@@ -1240,56 +1276,43 @@ def refresh_history(_tick, athlete_id, _n):
                                 f"(created before data embedding).")
         return note, dmc.Text("No assessments in Juvonno yet.", size="sm", c="dimmed"), status
 
-    def _hdr(rec, i, with_type=False):
+    def _when(rec, i):
         a = rec.get("assessment", {})
         d = a.get("date_of_examination") or f"Assessment {i + 1}"
         t = a.get("time_of_examination") or ""
-        hdr = f"{d} {t}".strip()
-        if with_type:
-            atype = {"baseline": "Baseline",
-                     "post_injury": "Post-injury"}.get(
-                str(a.get("assessment_type") or "").strip(),
-                (a.get("assessment_type") or "").replace("_", "-").title() or "—")
-            hdr += f"\n{atype}"
-        return hdr
+        return f"{d} {t}".strip()
 
-    rows = []
+    body = []
     for i, rec in enumerate(records):
         merged = {**rec.get("assessment", {}), **rec.get("scores", {})}
-        merged["date_of_examination"] = _hdr(rec, i)
-        rows.append({k: ("—" if merged.get(k) in (None, "") else merged.get(k))
-                     for _, k in HIST_TABLE_COLS})
-    table = dash_table.DataTable(
-        data=rows,
-        columns=[{"name": n, "id": k} for n, k in HIST_TABLE_COLS],
-        page_action="none",
-        style_table={"overflowX": "auto", "maxHeight": "300px", "overflowY": "auto"},
-        style_header={"fontWeight": "600", "backgroundColor": "#f8f9fa"},
-        style_cell={"padding": "8px", "fontSize": 13, "textAlign": "left",
-                    "fontFamily": "inherit"})
+        row = [dmc.Text(_when(rec, i), size="sm", fw=500),
+               type_badge(merged.get("assessment_type"))]
+        for _, key in HIST_TABLE_COLS[2:]:
+            v = merged.get(key)
+            row.append(dmc.Text("—" if v in (None, "") else str(v), size="sm"))
+        body.append(row)
+    table = m_table([n for n, _ in HIST_TABLE_COLS], body, max_height=320)
 
     # Serial comparison from the scraped PDFs
-    cols = [{"name": "Domain", "id": "domain"}]
-    data = {label: {"domain": label + (f" (of {mx})" if mx else "")}
-            for label, key, mx in S.DECISION_DOMAINS}
+    headers = [dmc.Text("Domain", fw=600, size="sm", c="white")]
     for i, rec in enumerate(records):
-        col_id = f"c{i}"
-        cols.append({"name": _hdr(rec, i, with_type=True), "id": col_id})
-        merged = {**rec.get("scores", {}),
-                  **{k: v for k, v in rec.get("assessment", {}).items()
-                     if k == "neuro_exam"}}
-        for label, key, _mx in S.DECISION_DOMAINS:
-            val = merged.get(key)
-            data[label][col_id] = "—" if val in (None, "") else val
-    compare = dash_table.DataTable(
-        columns=cols, data=list(data.values()), page_action="none",
-        style_table={"overflowX": "auto"},
-        style_header={"fontWeight": "600", "backgroundColor": NAVY, "color": "white",
-                      "whiteSpace": "pre-line"},
-        style_cell={"padding": "8px", "fontSize": 13, "textAlign": "center",
-                    "fontFamily": "inherit"},
-        style_cell_conditional=[{"if": {"column_id": "domain"},
-                                 "textAlign": "left", "fontWeight": "500"}])
+        headers.append(dmc.Stack([
+            dmc.Text(_when(rec, i), size="sm", fw=600, c="white"),
+            type_badge(rec.get("assessment", {}).get("assessment_type")),
+        ], gap=4, align="center"))
+    comp_rows = []
+    for label, key, mx in S.DECISION_DOMAINS:
+        row = [dmc.Text(label + (f" (of {mx})" if mx else ""), size="sm", fw=500)]
+        for rec in records:
+            merged = {**rec.get("scores", {}),
+                      **{k: v for k, v in rec.get("assessment", {}).items()
+                         if k == "neuro_exam"}}
+            v = merged.get(key)
+            row.append(dmc.Text("—" if v in (None, "") else str(v), size="sm",
+                                ta="center"))
+        comp_rows.append(row)
+    compare = m_table(headers, comp_rows, navy_header=True, center_body=True,
+                      min_width=520 + 150 * len(records))
 
     msg = f"Loaded {len(records)} assessment(s) from {n_docs} SCAT6 PDF(s) in Juvonno."
     partial = sum(1 for r in records if r.get("partial"))
@@ -1328,17 +1351,12 @@ def _pending_children():
         return dmc.Group([icon("tabler:circle-check", color="green"),
                           dmc.Text("Nothing pending — all assessments are uploaded.",
                                    size="sm", c="dimmed")], gap="xs")
-    rows = [{"ID": p["id"], "Athlete": p["athlete_name"],
-             "Date": p["date_of_examination"],
-             "Waiting to upload": p.get("pending_parts") or "pdf",
-             "Saved at (UTC)": p["created_at"]} for p in pending]
-    return dash_table.DataTable(
-        data=rows, columns=[{"name": c, "id": c} for c in rows[0].keys()],
-        page_action="none",
-        style_table={"overflowX": "auto", "maxHeight": "220px", "overflowY": "auto"},
-        style_header={"fontWeight": "600", "backgroundColor": "#fff4e6"},
-        style_cell={"padding": "8px", "fontSize": 13, "textAlign": "left",
-                    "fontFamily": "inherit"})
+    body = [[p["id"], p["athlete_name"], p["date_of_examination"],
+             dmc.Badge(p.get("pending_parts") or "pdf", color="orange",
+                       variant="light", size="sm"),
+             p["created_at"]] for p in pending]
+    return m_table(["ID", "Athlete", "Date", "Waiting to upload", "Saved at (UTC)"],
+                   body, max_height=240)
 
 @app.callback(Output("pending-wrap", "children"), Output("pending-badge", "children"),
               Output("pending-badge", "style"),
@@ -1385,14 +1403,12 @@ def refresh_docs(_n, athlete_id):
         desc = d.get("description") or ""
         rows.append({"ID": did, "Name": name, "Date": ddate, "Description": desc})
         opts.append({"label": f"{name} ({ddate})", "value": str(did)})
-    table = dash_table.DataTable(
-        data=rows,
-        columns=[{"name": c, "id": c} for c in ("ID", "Name", "Date", "Description")],
-        page_action="none",
-        style_table={"overflowX": "auto", "maxHeight": "260px", "overflowY": "auto"},
-        style_header={"fontWeight": "600", "backgroundColor": "#f8f9fa"},
-        style_cell={"padding": "8px", "fontSize": 13, "textAlign": "left",
-                    "fontFamily": "inherit"})
+    body = [[r["ID"],
+             dmc.Group([icon("tabler:file-type-pdf" if str(r["Name"]).lower().endswith(".pdf")
+                             else "tabler:file", width=16, color=NAVY),
+                        dmc.Text(str(r["Name"]), size="sm", fw=500)], gap=6),
+             r["Date"], r["Description"]] for r in rows]
+    table = m_table(["ID", "Name", "Date", "Description"], body, max_height=280)
     return table, opts
 
 @app.callback(Output("dl-doc", "data"), Output("docs-status", "children"),
