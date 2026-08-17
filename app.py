@@ -13,7 +13,7 @@
 #     API down), it stays queued and is retried automatically, or via "Sync now".
 #   • All form inputs persist in the browser (localStorage), so a refresh or
 #     dropped connection mid-intake loses nothing.
-import io, os, base64, functools, traceback
+import io, os, json, base64, functools, traceback
 from datetime import date, datetime
 
 import requests
@@ -699,6 +699,24 @@ def history_layout():
             ], gap="sm", mt="sm"),
             dmc.Box(id="docs-status", mt="sm"),
         ], icon_name="tabler:files"),
+        section("SCAT Intake Inspector (raw JSON from Juvonno)", [
+            dmc.Text("Diagnostic tool: scans this athlete's Juvonno encounters for "
+                     "intakes/charts with “SCAT” in the template name and shows their "
+                     "raw JSON, so the field mapping can be tuned to your templates.",
+                     size="sm", c="dimmed", mb="sm"),
+            dmc.Button("Scan encounters for SCAT intakes", id="btn-scan-scat",
+                       variant="light", color="grape",
+                       leftSection=icon("tabler:radar-2"), mb="sm"),
+            dcc.Loading(dmc.Box(id="scat-enc-wrap"), type="circle"),
+            dmc.Group([
+                dmc.Select(id="scat-enc-dd", placeholder="Pick an intake to view its JSON…",
+                           searchable=True, clearable=True, w=380),
+                dcc.Clipboard(id="scat-json-copy", title="Copy JSON",
+                              style={"fontSize": 22, "cursor": "pointer"}),
+            ], gap="sm", mt="sm"),
+            dmc.Box(id="scat-json-wrap", mt="sm"),
+            dmc.Box(id="scat-status", mt="xs"),
+        ], icon_name="tabler:code-dots"),
         section("Pending Uploads (offline queue)", [
             dmc.Text("Assessments saved while Juvonno was unreachable wait here and are "
                      "retried automatically every 2 minutes. Nothing is lost if the "
@@ -1455,6 +1473,83 @@ def download_doc(n, doc_id, athlete_id):
     except Exception as e:
         traceback.print_exc()
         return no_update, err_alert(f"Download failed: {e}")
+
+# ───────────────────────── SCAT intake inspector (diagnostic) ─────────────────────────
+def _enc_template_names(enc: dict) -> list:
+    names = []
+    for block in (enc.get("data") or []):
+        if isinstance(block, dict) and isinstance(block.get("template"), dict):
+            for key in ("tab_name", "name", "title"):
+                v = block["template"].get(key)
+                if isinstance(v, str) and v.strip():
+                    names.append(v.strip())
+    return names
+
+@app.callback(Output("scat-enc-wrap", "children"), Output("scat-enc-dd", "data"),
+              Output("scat-status", "children"),
+              Input("btn-scan-scat", "n_clicks"),
+              State("athlete-dd", "value"), prevent_initial_call=True)
+def scan_scat_encounters(n, athlete_id):
+    if not n:
+        raise PreventUpdate
+    if not athlete_id:
+        return (dmc.Text("Select an athlete first.", size="sm", c="dimmed"), [],
+                "")
+    try:
+        eids = juv.list_customer_encounter_ids(int(athlete_id))
+    except Exception as e:
+        traceback.print_exc()
+        return dmc.Text("", size="sm"), [], err_alert(f"Encounter scan failed: {e}")
+    rows, opts, scanned = [], [], 0
+    for eid in eids:
+        enc = juv.fetch_encounter(int(eid))
+        if not enc:
+            continue
+        scanned += 1
+        names = _enc_template_names(enc)
+        blob = json.dumps(enc, default=str).lower()
+        if "scat" not in " ".join(names).lower() and "scat" not in blob:
+            continue
+        date_str = ""
+        for key in ("chart_date", "date", "encounter_date", "created_at"):
+            if enc.get(key):
+                date_str = str(enc.get(key)).split("T")[0].split(" ")[0]
+                break
+        n_fields = sum(len(b.get("fields") or []) for b in (enc.get("data") or [])
+                       if isinstance(b, dict))
+        label = " / ".join(names) or f"Encounter {eid}"
+        rows.append([eid, dmc.Text(label, size="sm", fw=500), date_str, n_fields])
+        opts.append({"label": f"#{eid} — {label} ({date_str})", "value": str(eid)})
+    if not rows:
+        return (dmc.Text(f"No SCAT-named intakes found "
+                         f"({scanned} encounter(s) scanned).", size="sm", c="dimmed"),
+                [], "")
+    table = m_table(["Encounter ID", "Template", "Date", "# fields"], rows,
+                    max_height=240)
+    return table, opts, dmc.Text(
+        f"{len(rows)} SCAT intake(s) found out of {scanned} encounter(s). "
+        f"Pick one below and use the copy icon to grab its JSON.",
+        size="sm", c="dimmed")
+
+@app.callback(Output("scat-json-wrap", "children"),
+              Output("scat-json-copy", "content"),
+              Input("scat-enc-dd", "value"), prevent_initial_call=True)
+def show_scat_json(eid):
+    if not eid:
+        return "", ""
+    try:
+        enc = juv.fetch_encounter(int(eid))
+        pretty = json.dumps(enc, indent=2, default=str, ensure_ascii=False)
+        view = html.Pre(pretty, style={
+            "maxHeight": "420px", "overflow": "auto", "fontSize": "12px",
+            "background": "var(--mantine-color-gray-0)",
+            "border": "1px solid var(--mantine-color-gray-3)",
+            "borderRadius": "8px", "padding": "12px",
+            "whiteSpace": "pre-wrap", "wordBreak": "break-word"})
+        return view, pretty
+    except Exception as e:
+        traceback.print_exc()
+        return err_alert(f"Could not fetch encounter {eid}: {e}"), ""
 
 # ───────────────────────── Main ─────────────────────────
 if __name__ == "__main__":
