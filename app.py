@@ -765,8 +765,11 @@ app = Dash(
     suppress_callback_exceptions=True,
     # Proper mobile viewport; input font sizing that stops iOS focus-zoom is in
     # assets/custom.css.
+    # maximum-scale=1 stops iOS Safari's automatic zoom-on-input-focus (the
+    # "zooms in and never zooms back" behaviour). Manual pinch-zoom still
+    # works — iOS deliberately ignores this cap for user-initiated zooming.
     meta_tags=[{"name": "viewport",
-                "content": "width=device-width, initial-scale=1"}],
+                "content": "width=device-width, initial-scale=1, maximum-scale=1"}],
 )
 app.title = "SCAT6 Intake — CSI Pacific"
 
