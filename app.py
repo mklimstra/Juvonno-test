@@ -142,7 +142,14 @@ def _push_test():
                                     "Push notifications are working on this device.")
         return {"ok": bool(ok)}
     except Exception as e:
-        return {"error": str(e)[:200]}, 500
+        msg = str(e)
+        if "VapidPkHashMismatch" in msg:
+            return {"error": "The server's push keys changed since this device "
+                             "subscribed. Press 'Enable / update reminders' to "
+                             "refresh this device, and set VAPID_PRIVATE_KEY / "
+                             "VAPID_PUBLIC_KEY env vars so the keys stop "
+                             "changing across redeploys."}, 500
+        return {"error": msg[:200]}, 500
 
 # Background reminder loop (per-device interval; see push_service.py)
 push_service.start_reminder_loop()
@@ -1858,6 +1865,23 @@ clientside_callback(
                 return arr;
             };
             let sub = await reg.pushManager.getSubscription();
+            if (sub) {
+                // If the server's VAPID key changed since this device subscribed,
+                // the old subscription is unusable (VapidPkHashMismatch) —
+                // drop it and subscribe fresh under the current key.
+                let stale = true;
+                try {
+                    const cur = new Uint8Array(sub.options.applicationServerKey);
+                    const want = toKey(kj.publicKey);
+                    stale = cur.length !== want.length;
+                    if (!stale) {
+                        for (let i = 0; i < cur.length; i++) {
+                            if (cur[i] !== want[i]) { stale = true; break; }
+                        }
+                    }
+                } catch (e) { stale = true; }
+                if (stale) { await sub.unsubscribe(); sub = null; }
+            }
             if (!sub) {
                 sub = await reg.pushManager.subscribe({
                     userVisibleOnly: true,
