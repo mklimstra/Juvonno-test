@@ -67,25 +67,3 @@ python app.py
 * Juvonno's public API has no document UPDATE/DELETE endpoints, so the PDF-per-
   assessment model (immutable documents) is the natural fit; history is
   reconstructed by reading those PDFs back.
-
-## PWA, stay-signed-in & push reminders
-
-* **Install on a phone**: open the app in the browser → Share → "Add to Home
-  Screen" (iPhone) or "Install app" (Android). Manifest + service worker are
-  served at `/manifest.json` and `/sw.js`; the worker does no caching — it
-  exists for installability and push only.
-* **Stay signed in**: sessions are permanent (60 days). Set `FLASK_SECRET_KEY`
-  in the deployment env or a redeploy logs everyone out. How long the OAuth
-  token itself lasts is set on apps.csipacific.ca (the application's
-  access-token lifetime) — lengthen it there for true stay-signed-in.
-* **Reminders**: the "App & Reminders" card (bottom of the New SCAT6 tab) lets
-  each device enable push reminders and pick the interval (default every
-  2 hours). iPhone requires iOS 16.4+ and the app installed to the Home
-  Screen. The server sends the pushes (a background loop checks each minute),
-  so reminders only fire while the app deployment is running.
-* **VAPID keys**: set `VAPID_PRIVATE_KEY`, `VAPID_PUBLIC_KEY`, and
-  `VAPID_CLAIMS_EMAIL` in the deployment env for stable keys. Without them a
-  key pair is generated into `vapid_keys.json` — fine for testing, but if that
-  file is lost (ephemeral filesystem), every device must re-enable reminders.
-* **Reverting**: `backup_pre_pwa/REVERT.md` has exact steps; the feature is
-  fully removable (new files only, plus one ignored table in scat6.db).

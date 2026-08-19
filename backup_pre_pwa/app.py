@@ -14,9 +14,7 @@
 #   • All form inputs persist in the browser (localStorage), so a refresh or
 #     dropped connection mid-intake loses nothing.
 import io, os, json, base64, functools, traceback
-from datetime import date, datetime, timedelta
-
-import flask
+from datetime import date, datetime
 
 import requests
 import pandas as pd
@@ -35,8 +33,6 @@ import scat6_store as store
 from scat6_pdf import build_scat6_pdf, extract_assessment_from_pdf
 from scat6_encounter import parse_scat6_encounter
 import juvonno_api as juv
-import push_store
-import push_service
 
 # ───────────────────────── Constants ─────────────────────────
 BASE_ROOT_URL = APP_URL  # login entry point (same value the old app hardcoded)
@@ -58,94 +54,6 @@ server = auth.server
 here = os.path.dirname(os.path.abspath(__file__))
 server.static_folder = os.path.join(here, "assets")
 server.static_url_path = "/assets"
-
-# ── Stay signed in: permanent sessions with a long lifetime. Set
-# FLASK_SECRET_KEY in the deployment env so sessions also survive restarts /
-# redeploys (without it, a random key is used and a redeploy logs everyone out).
-if os.getenv("FLASK_SECRET_KEY"):
-    server.secret_key = os.getenv("FLASK_SECRET_KEY")
-server.config.update(
-    PERMANENT_SESSION_LIFETIME=timedelta(days=60),
-    SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_REFRESH_EACH_REQUEST=True,
-)
-
-@server.before_request
-def _keep_session_alive():
-    flask.session.permanent = True
-
-# ── PWA: serve the service worker from the site root (a worker under /assets/
-# could only control /assets/) and the manifest at a stable URL. ──
-@server.route("/sw.js")
-def _service_worker():
-    resp = flask.send_from_directory(here, "sw.js",
-                                     mimetype="application/javascript")
-    resp.headers["Service-Worker-Allowed"] = "/"
-    resp.headers["Cache-Control"] = "no-cache"
-    return resp
-
-@server.route("/manifest.json")
-def _manifest():
-    return flask.send_from_directory(os.path.join(here, "assets"),
-                                     "manifest.json",
-                                     mimetype="application/manifest+json")
-
-# ── Web push endpoints ──
-def _require_login():
-    try:
-        return bool(auth.get_token())
-    except Exception:
-        return False
-
-@server.route("/push/public_key")
-def _push_public_key():
-    return {"publicKey": push_service.public_key()}
-
-@server.route("/push/subscribe", methods=["POST"])
-def _push_subscribe():
-    if not _require_login():
-        return {"error": "not signed in"}, 401
-    js = flask.request.get_json(force=True, silent=True) or {}
-    sub = js.get("subscription") or {}
-    try:
-        minutes = max(1, int(js.get("minutes") or 120))
-    except (TypeError, ValueError):
-        minutes = 120
-    try:
-        name = _get_signed_in_name()
-    except Exception:
-        name = ""
-    push_store.save_subscription(sub, minutes, name)
-    return {"ok": True, "minutes": minutes}
-
-@server.route("/push/unsubscribe", methods=["POST"])
-def _push_unsubscribe():
-    if not _require_login():
-        return {"error": "not signed in"}, 401
-    js = flask.request.get_json(force=True, silent=True) or {}
-    endpoint = str(js.get("endpoint") or "")
-    if endpoint:
-        push_store.delete_subscription(endpoint)
-    return {"ok": True}
-
-@server.route("/push/test", methods=["POST"])
-def _push_test():
-    if not _require_login():
-        return {"error": "not signed in"}, 401
-    js = flask.request.get_json(force=True, silent=True) or {}
-    endpoint = str(js.get("endpoint") or "")
-    rec = push_store.get_subscription(endpoint) if endpoint else None
-    if not rec:
-        return {"error": "no subscription found for this device"}, 404
-    try:
-        ok = push_service.send_push(rec["subscription"], "SCAT6 test notification",
-                                    "Push notifications are working on this device.")
-        return {"ok": bool(ok)}
-    except Exception as e:
-        return {"error": str(e)[:200]}, 500
-
-# Background reminder loop (per-device interval; see push_service.py)
-push_service.start_reminder_loop()
 
 # ───────────────────────── Signed-in name helpers (unchanged) ─────────────────────────
 def _b64url_decode(part: str) -> bytes:
@@ -763,39 +671,6 @@ def form_layout():
             ], gutter="sm"),
         ], icon_name="tabler:stethoscope"),
 
-        # ── App install & reminders ──
-        section("App & Reminders", [
-            dmc.Text("Install this tool on your phone: open it in the browser, then "
-                     "Share → “Add to Home Screen” (iPhone) or “Install app” "
-                     "(Android). On iPhone, reminders only work after it is "
-                     "installed to the Home Screen (iOS 16.4+).",
-                     size="sm", c="dimmed", mb="sm"),
-            dmc.Group([
-                dmc.Select(id="reminder-interval", label="Remind me to do a form every…",
-                           data=[{"label": "30 minutes", "value": "30"},
-                                 {"label": "1 hour", "value": "60"},
-                                 {"label": "2 hours", "value": "120"},
-                                 {"label": "4 hours", "value": "240"},
-                                 {"label": "8 hours", "value": "480"},
-                                 {"label": "24 hours", "value": "1440"}],
-                           value="120", w=220,
-                           leftSection=icon("tabler:alarm", width=16), **PERSIST),
-            ], gap="sm", mb="sm"),
-            dmc.Group([
-                dmc.Button("Enable / update reminders", id="btn-notify-enable",
-                           color="indigo", leftSection=icon("tabler:bell-plus")),
-                dmc.Button("Send test notification", id="btn-notify-test",
-                           variant="light", leftSection=icon("tabler:bell-ringing")),
-                dmc.Button("Disable on this device", id="btn-notify-disable",
-                           variant="subtle", color="gray",
-                           leftSection=icon("tabler:bell-off")),
-            ], gap="sm"),
-            dmc.Box(id="notify-status", mt="sm"),
-            dmc.Text("Reminders are per device and sent by the server, so the app "
-                     "must stay deployed and running for them to fire.",
-                     size="xs", c="dimmed", mt="xs"),
-        ], icon_name="tabler:device-mobile"),
-
         # ── Live score summary + save ──
         section("Score Summary & Save", [
             dmc.Box(id="score-summary"),
@@ -901,39 +776,6 @@ app = Dash(
                 "content": "width=device-width, initial-scale=1, maximum-scale=1"}],
 )
 app.title = "SCAT6 Intake — CSI Pacific"
-
-# PWA head tags + service-worker registration (Add to Home Screen support)
-app.index_string = """<!DOCTYPE html>
-<html>
-    <head>
-        {%metas%}
-        <title>{%title%}</title>
-        {%favicon%}
-        {%css%}
-        <link rel="manifest" href="/manifest.json">
-        <link rel="apple-touch-icon" href="/assets/img/icon-180.png">
-        <meta name="apple-mobile-web-app-capable" content="yes">
-        <meta name="mobile-web-app-capable" content="yes">
-        <meta name="apple-mobile-web-app-status-bar-style" content="default">
-        <meta name="apple-mobile-web-app-title" content="SCAT6">
-        <meta name="theme-color" content="#2b3a67">
-    </head>
-    <body>
-        {%app_entry%}
-        <footer>
-            {%config%}
-            {%scripts%}
-            {%renderer%}
-        </footer>
-        <script>
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/sw.js').catch(function (e) {
-                console.log('Service worker registration failed:', e);
-            });
-        }
-        </script>
-    </body>
-</html>"""
 
 app.layout = dmc.MantineProvider(
     theme={"primaryColor": "indigo",
@@ -1829,111 +1671,6 @@ def show_staff_json(n, staff_data):
     except Exception as e:
         traceback.print_exc()
         return err_alert(f"Could not fetch staff record: {e}"), ""
-
-
-# ───────────────────────── Push reminders (clientside) ─────────────────────────
-clientside_callback(
-    """
-    async function(n, minutes) {
-        const nu = window.dash_clientside.no_update;
-        if (!n) { return nu; }
-        try {
-            if (!window.isSecureContext) { return 'Needs HTTPS.'; }
-            if (!('serviceWorker' in navigator)) { return 'This browser does not support service workers.'; }
-            if (!('PushManager' in window) || !('Notification' in window)) {
-                return 'Push is not available here. On iPhone: iOS 16.4+, and the app must first be added to the Home Screen (Share -> Add to Home Screen), then opened from that icon.';
-            }
-            const reg = await navigator.serviceWorker.register('/sw.js');
-            await navigator.serviceWorker.ready;
-            const perm = await Notification.requestPermission();
-            if (perm !== 'granted') { return 'Notifications were not allowed. Enable them in Settings for this app and try again.'; }
-            const kr = await fetch('/push/public_key');
-            const kj = await kr.json();
-            const toKey = function (s) {
-                const pad = '='.repeat((4 - s.length % 4) % 4);
-                const b64 = (s + pad).replace(/-/g, '+').replace(/_/g, '/');
-                const raw = atob(b64);
-                const arr = new Uint8Array(raw.length);
-                for (let i = 0; i < raw.length; i++) { arr[i] = raw.charCodeAt(i); }
-                return arr;
-            };
-            let sub = await reg.pushManager.getSubscription();
-            if (!sub) {
-                sub = await reg.pushManager.subscribe({
-                    userVisibleOnly: true,
-                    applicationServerKey: toKey(kj.publicKey)
-                });
-            }
-            const resp = await fetch('/push/subscribe', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({subscription: sub.toJSON(),
-                                      minutes: parseInt(minutes || '120', 10)})
-            });
-            if (!resp.ok) { return 'Server refused the subscription (' + resp.status + '). Are you signed in?'; }
-            const jj = await resp.json();
-            const m = jj.minutes;
-            const label = (m % 1440 === 0) ? (m / 1440) + ' day(s)'
-                        : (m % 60 === 0) ? (m / 60) + ' hour(s)' : m + ' minutes';
-            return 'Reminders ON for this device - every ' + label + '. First reminder in one interval.';
-        } catch (e) { return 'Could not enable reminders: ' + e; }
-    }
-    """,
-    Output("notify-status", "children"),
-    Input("btn-notify-enable", "n_clicks"),
-    State("reminder-interval", "value"),
-    prevent_initial_call=True)
-
-clientside_callback(
-    """
-    async function(n) {
-        const nu = window.dash_clientside.no_update;
-        if (!n) { return nu; }
-        try {
-            if (!('serviceWorker' in navigator)) { return 'Not supported in this browser.'; }
-            const reg = await navigator.serviceWorker.ready;
-            const sub = await reg.pushManager.getSubscription();
-            if (!sub) { return 'No reminder subscription on this device yet - press Enable first.'; }
-            const resp = await fetch('/push/test', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({endpoint: sub.endpoint})
-            });
-            if (!resp.ok) {
-                const jj = await resp.json().catch(function(){ return {}; });
-                return 'Test failed (' + resp.status + '): ' + (jj.error || 'unknown');
-            }
-            return 'Test sent - a notification should appear within a few seconds.';
-        } catch (e) { return 'Test failed: ' + e; }
-    }
-    """,
-    Output("notify-status", "children", allow_duplicate=True),
-    Input("btn-notify-test", "n_clicks"),
-    prevent_initial_call=True)
-
-clientside_callback(
-    """
-    async function(n) {
-        const nu = window.dash_clientside.no_update;
-        if (!n) { return nu; }
-        try {
-            if (!('serviceWorker' in navigator)) { return 'Not supported in this browser.'; }
-            const reg = await navigator.serviceWorker.ready;
-            const sub = await reg.pushManager.getSubscription();
-            if (!sub) { return 'Reminders were not enabled on this device.'; }
-            await fetch('/push/unsubscribe', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({endpoint: sub.endpoint})
-            });
-            await sub.unsubscribe();
-            return 'Reminders disabled on this device.';
-        } catch (e) { return 'Could not disable: ' + e; }
-    }
-    """,
-    Output("notify-status", "children", allow_duplicate=True),
-    Input("btn-notify-disable", "n_clicks"),
-    prevent_initial_call=True)
 
 # ───────────────────────── Main ─────────────────────────
 if __name__ == "__main__":

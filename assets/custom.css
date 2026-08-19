@@ -29,8 +29,8 @@ html, body {
   overflow-x: hidden;
 }
 @media (pointer: coarse) {
-  table,
-  .mantine-Table-table {
+  table:not(.sticky-first-col),
+  .mantine-Table-table:not(.sticky-first-col) {
     display: block;
     max-width: 100%;
     overflow-x: auto;
@@ -41,4 +41,30 @@ html, body {
     padding-left: 8px;
     padding-right: 8px;
   }
+}
+
+/* ── SCAT6 History comparison: pin the Domain column and the date header row
+   while the metrics scroll. The TableScrollContainer is the scroll box. ── */
+.sticky-first-col thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--mantine-color-gray-1, #f1f3f5);
+}
+.sticky-first-col th:first-child,
+.sticky-first-col td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--mantine-color-body, #fff);
+  box-shadow: 4px 0 6px -4px rgba(0, 0, 0, 0.18);
+}
+.sticky-first-col thead th:first-child {
+  z-index: 4;  /* top-left corner cell sits above both sticky planes */
+  background: var(--mantine-color-gray-1, #f1f3f5);
+}
+/* striped/hover row backgrounds are translucent — keep the pinned column
+   opaque so scrolling content never shows through it */
+.sticky-first-col tbody tr td:first-child {
+  background: var(--mantine-color-body, #fff) !important;
 }
