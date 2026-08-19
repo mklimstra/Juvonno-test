@@ -16,12 +16,27 @@ import push_store
 KEY_FILE = os.path.join(os.path.dirname(__file__), "vapid_keys.json")
 CLAIMS_EMAIL = os.getenv("VAPID_CLAIMS_EMAIL", "mklimstra@csipacific.ca")
 
-_keys: Optional[Tuple[str, str]] = None  # (private_pem, public_b64url)
+_keys: Optional[Tuple[str, str]] = None  # (private_b64url_raw, public_b64url)
 _loop_started = False
 
 
+def _normalize_private_key(priv: str) -> str:
+    """pywebpush expects the VAPID private key as base64url of the RAW 32-byte
+    EC private value — NOT a PEM. Accept either form and normalize, so keys
+    from env vars, older vapid_keys.json files (which stored PEM), or raw
+    strings all work. The public key is unchanged by this, so existing phone
+    subscriptions remain valid."""
+    priv = (priv or "").strip()
+    if "BEGIN" not in priv:
+        return priv  # already raw base64url
+    from cryptography.hazmat.primitives import serialization
+    key = serialization.load_pem_private_key(priv.encode(), password=None)
+    raw = key.private_numbers().private_value.to_bytes(32, "big")
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
 def get_vapid_keys() -> Tuple[str, str]:
-    """(private_key_pem, public_key_b64url) — env first, then key file,
+    """(private_key_b64url_raw, public_key_b64url) — env first, then key file,
     else generate and persist."""
     global _keys
     if _keys:
@@ -29,12 +44,21 @@ def get_vapid_keys() -> Tuple[str, str]:
     env_priv = os.getenv("VAPID_PRIVATE_KEY")
     env_pub = os.getenv("VAPID_PUBLIC_KEY")
     if env_priv and env_pub:
-        _keys = (env_priv, env_pub)
+        _keys = (_normalize_private_key(env_priv), env_pub)
         return _keys
     if os.path.exists(KEY_FILE):
         try:
             js = json.load(open(KEY_FILE))
-            _keys = (js["private_key"], js["public_key"])
+            priv = _normalize_private_key(js["private_key"])
+            _keys = (priv, js["public_key"])
+            if priv != js["private_key"]:  # migrate old PEM-format file in place
+                try:
+                    with open(KEY_FILE, "w") as f:
+                        json.dump({"private_key": priv,
+                                   "public_key": js["public_key"]}, f)
+                    print("push: migrated vapid_keys.json to raw key format")
+                except Exception:
+                    pass
             return _keys
         except Exception:
             pass
@@ -46,15 +70,14 @@ def get_vapid_keys() -> Tuple[str, str]:
     raw_pub = v.public_key.public_bytes(serialization.Encoding.X962,
                                         serialization.PublicFormat.UncompressedPoint)
     public_b64 = base64.urlsafe_b64encode(raw_pub).rstrip(b"=").decode()
-    private_pem = v.private_key.private_bytes(
-        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-        serialization.NoEncryption()).decode()
+    raw_priv = v.private_key.private_numbers().private_value.to_bytes(32, "big")
+    private_b64 = base64.urlsafe_b64encode(raw_priv).rstrip(b"=").decode()
     try:
         with open(KEY_FILE, "w") as f:
-            json.dump({"private_key": private_pem, "public_key": public_b64}, f)
+            json.dump({"private_key": private_b64, "public_key": public_b64}, f)
     except Exception as e:
         print(f"push: could not persist VAPID keys ({e}) — set VAPID_* env vars")
-    _keys = (private_pem, public_b64)
+    _keys = (private_b64, public_b64)
     return _keys
 
 
