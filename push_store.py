@@ -45,7 +45,8 @@ def save_subscription(subscription: Dict, reminder_minutes: int = 120,
              user_name=excluded.user_name,
              reminder_minutes=excluded.reminder_minutes,
              enabled=1,
-             last_reminded_at=datetime('now')""",
+             last_reminded_at=COALESCE(push_subscriptions.last_reminded_at,
+                                       excluded.last_reminded_at)""",
         (endpoint, json.dumps(subscription), user_name or "",
          max(1, int(reminder_minutes))))
     conn.commit()

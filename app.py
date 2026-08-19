@@ -97,6 +97,13 @@ def _require_login():
     except Exception:
         return False
 
+@server.route("/ping")
+def _ping():
+    """Lightweight keep-alive target (for e.g. UptimeRobot). Keeping the app
+    awake keeps the background reminder loop running, so scheduled push
+    reminders actually fire. No auth, no session, near-zero work."""
+    return {"ok": True, "pending_reminders": push_store.count_enabled()}
+
 @server.route("/push/public_key")
 def _push_public_key():
     return {"publicKey": push_service.public_key()}
@@ -133,10 +140,24 @@ def _push_test():
     if not _require_login():
         return {"error": "not signed in"}, 401
     js = flask.request.get_json(force=True, silent=True) or {}
-    endpoint = str(js.get("endpoint") or "")
+    sub = js.get("subscription") or {}
+    endpoint = str(sub.get("endpoint") or js.get("endpoint") or "")
     rec = push_store.get_subscription(endpoint) if endpoint else None
+    if not rec and sub.get("endpoint"):
+        # Server-side store was reset (redeploy) — quietly re-register.
+        try:
+            minutes = max(1, int(js.get("minutes") or 120))
+        except (TypeError, ValueError):
+            minutes = 120
+        try:
+            name = _get_signed_in_name()
+        except Exception:
+            name = ""
+        push_store.save_subscription(sub, minutes, name)
+        rec = push_store.get_subscription(endpoint)
     if not rec:
-        return {"error": "no subscription found for this device"}, 404
+        return {"error": "no subscription found for this device — "
+                         "press 'Enable / update reminders' first"}, 404
     try:
         ok = push_service.send_push(rec["subscription"], "SCAT6 test notification",
                                     "Push notifications are working on this device.")
@@ -986,6 +1007,7 @@ app.layout = dmc.MantineProvider(
         # Stores & downloads
         dcc.Store(id="demo-store", data={}),
         dcc.Store(id="staff-store", data={}),
+        dcc.Store(id="push-resync", data=None),
         dcc.Store(id="form-collect", data={}),
         dcc.Store(id="history-refresh", data=0),
         dcc.Download(id="dl-pdf"),
@@ -1918,10 +1940,11 @@ clientside_callback(
             const reg = await navigator.serviceWorker.ready;
             const sub = await reg.pushManager.getSubscription();
             if (!sub) { return 'No reminder subscription on this device yet - press Enable first.'; }
+            const mins = document.querySelector('#reminder-interval input');
             const resp = await fetch('/push/test', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({endpoint: sub.endpoint})
+                body: JSON.stringify({subscription: sub.toJSON()})
             });
             if (!resp.ok) {
                 const jj = await resp.json().catch(function(){ return {}; });
@@ -1957,6 +1980,32 @@ clientside_callback(
     """,
     Output("notify-status", "children", allow_duplicate=True),
     Input("btn-notify-disable", "n_clicks"),
+    prevent_initial_call=True)
+
+clientside_callback(
+    """
+    async function(n, minutes) {
+        const nu = window.dash_clientside.no_update;
+        if (!n) { return nu; }
+        try {
+            if (!('serviceWorker' in navigator) || !('PushManager' in window)) { return nu; }
+            if (Notification.permission !== 'granted') { return nu; }
+            const reg = await navigator.serviceWorker.ready;
+            const sub = await reg.pushManager.getSubscription();
+            if (!sub) { return nu; }
+            await fetch('/push/subscribe', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({subscription: sub.toJSON(),
+                                      minutes: parseInt(minutes || '120', 10)})
+            });
+            return 'resynced';
+        } catch (e) { return nu; }
+    }
+    """,
+    Output("push-resync", "data"),
+    Input("init-interval", "n_intervals"),
+    State("reminder-interval", "value"),
     prevent_initial_call=True)
 
 # ───────────────────────── Main ─────────────────────────
